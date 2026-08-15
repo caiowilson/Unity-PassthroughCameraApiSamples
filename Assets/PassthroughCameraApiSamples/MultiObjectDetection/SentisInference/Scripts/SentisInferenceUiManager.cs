@@ -83,7 +83,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_labels = labelsAsset.text.Split('\n');
         }
 
-        public void DrawUIBoxes(List<(int classId, Vector4 boundingBox)> detections, Vector2 inputSize, Pose cameraPose)
+        // Object Tagger slice 3 Task 2: signature widened to carry the score.
+        //
+        // SCOPE BOUNDARY — the score stops here. BoundingBoxData deliberately gains no
+        // score field in slice 3. Spec line 73 assigns per-label score refresh and
+        // rendering "<class> — <confidence>%" to SLICE 5, which also moves per-label
+        // state out of RectTransforms. Carrying it further now would eat that work and
+        // couple this slice to state slice 5 is about to relocate.
+        public void DrawUIBoxes(List<(int classId, Vector4 boundingBox, float score)> detections, Vector2 inputSize, Pose cameraPose)
         {
             Vector2 currentResolution = m_cameraAccess.CurrentResolution;
 

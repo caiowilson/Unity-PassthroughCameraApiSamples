@@ -34,7 +34,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private Worker m_engine;
         private Vector2Int m_inputSize;
-        private readonly List<(int classId, Vector4 boundingBox)> m_detections = new List<(int classId, Vector4 boundingBox)>();
+        // Object Tagger slice 3 Task 2: the tuple now carries the detection score.
+        //
+        // Every earlier note said "confidence dies at :37", which reads like a model or
+        // export problem and sends people to the model converter. It is not. The
+        // converter already emits scores as a first-class output
+        // (graph.Compile(corners, classIDs, scores)), RunInference already reads that
+        // tensor every frame, and NonMaxSuppression already holds the value -- it
+        // filters on it and sorts by it -- before dropping it when building this tuple.
+        //
+        // Carrying confidence is therefore a type widening plus one argument. No model
+        // change, no re-export, no extra readback.
+        private readonly List<(int classId, Vector4 boundingBox, float score)> m_detections = new List<(int classId, Vector4 boundingBox, float score)>();
 
         private void Awake()
         {
@@ -193,7 +204,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_uiInference.DrawUIBoxes(m_detections, m_inputSize, cachedCameraPose);
         }
 
-        private static void NonMaxSuppression(List<(int classId, Vector4 boundingBox)> outDetections, Tensor<float> boxes, Tensor<int> classIDs, Tensor<float> scores, float iouThreshold, float scoreThreshold)
+        private static void NonMaxSuppression(List<(int classId, Vector4 boundingBox, float score)> outDetections, Tensor<float> boxes, Tensor<int> classIDs, Tensor<float> scores, float iouThreshold, float scoreThreshold)
         {
             outDetections.Clear();
 
@@ -226,7 +237,9 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 int idx = filteredIndices[i];
 
                 // Add this detection to results
-                outDetections.Add((classIDs[idx], GetBox(idx)));
+                // scoresArray[idx] is already in hand here -- it was used to filter above
+                // and to sort the list. Upstream simply discarded it at this line.
+                outDetections.Add((classIDs[idx], GetBox(idx), scoresArray[idx]));
 
                 // Suppress overlapping boxes regardless of class
                 for (int j = i + 1; j < filteredIndices.Count; j++)
