@@ -25,6 +25,21 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [SerializeField, Range(0, 1)] private float m_iouThreshold = 0.6f;
         [SerializeField, Range(0, 1)] private float m_scoreThreshold = 0.23f;
 
+        // Object Tagger slice 3 Task 4 — the acceptance cap (spec line 76).
+        //
+        // Upstream had NO cap: the NMS loop appended without bound. Spec line 76 assigns
+        // this lever to slice 3 explicitly so that slice 6 can TUNE it rather than build
+        // it under performance pressure.
+        //
+        // Applied after the descending sort, so the cap keeps the most confident
+        // detections rather than an arbitrary subset. Default 20 is comfortably above
+        // what device runs have shown (slice 1 saw 5 simultaneous, slice 2 saw 7) while
+        // still bounding the worst case.
+        [SerializeField, Range(1, 100)] private int m_maxAcceptedDetections = 20;
+
+        [Header("Class curation")]
+        [SerializeField] private bool m_curateClasses = true;
+
         [Header("UI display references")]
         [SerializeField] private SentisInferenceUiManager m_uiInference;
 
@@ -59,20 +74,75 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             //
             // PreloadModel hardcodes BackendType.CPU regardless of m_backend. That is
             // preserved verbatim; changing the backend is a slice 6 performance lever.
-            Debug.Log("[ObjectTagger] PreloadModel warm-up starting.");
-            PreloadModel(m_sentisModel);
-            Debug.Log("[ObjectTagger] PreloadModel warm-up complete.");
+            // Object Tagger slice 3 Task 5 — model load failure state (spec line 71).
+            //
+            // Upstream ran all of this bare. A throw here left the MonoBehaviour dead
+            // with NO user-visible signal: the app launches, passthrough works, and
+            // nothing is ever labelled. That is the same silent-failure class slice 2
+            // spent a whole section on, and it is indistinguishable on device from an
+            // untracked anchor or a permission failure.
+            try
+            {
+                Debug.Log("[ObjectTagger] PreloadModel warm-up starting.");
+                PreloadModel(m_sentisModel);
+                Debug.Log("[ObjectTagger] PreloadModel warm-up complete.");
 
-            var model = ModelLoader.Load(m_sentisModel);
-            var inputShape = model.inputs[0].shape;
-            m_inputSize = new Vector2Int(inputShape.Get(2), inputShape.Get(3));
-            Debug.Log($"[ObjectTagger] model input size = {m_inputSize.x}x{m_inputSize.y}, backend = {m_backend}");
-            m_engine = new Worker(model, m_backend);
+                var model = ModelLoader.Load(m_sentisModel);
+                var inputShape = model.inputs[0].shape;
+                m_inputSize = new Vector2Int(inputShape.Get(2), inputShape.Get(3));
+                Debug.Log($"[ObjectTagger] model input size = {m_inputSize.x}x{m_inputSize.y}, backend = {m_backend}");
+                m_engine = new Worker(model, m_backend);
+            }
+            catch (System.Exception e)
+            {
+                m_modelLoadFailed = true;
+                Debug.LogError($"[ObjectTagger] MODEL LOAD FAILED: {e.GetType().Name}: {e.Message}");
+                if (m_uiMenuManager != null)
+                {
+                    m_uiMenuManager.SetModelLoadFailed(true);
+                }
+            }
+
+            m_allowedClassIds = null;
+        }
+
+        /// True when Awake could not construct the inference engine. Every path that
+        /// would dereference m_engine checks this first.
+        private bool m_modelLoadFailed;
+
+        /// Curated class IDs, resolved from the labels asset on first use. Null until
+        /// resolved; empty means curation is disabled.
+        private HashSet<int> m_allowedClassIds;
+
+        private HashSet<int> GetAllowedClassIds()
+        {
+            if (!m_curateClasses)
+            {
+                return null;
+            }
+            if (m_allowedClassIds == null)
+            {
+                // Resolve by NAME against the shipped labels, so a drifted labels file or
+                // an Ultralytics spelling is reported loudly rather than silently matching
+                // nothing. See SupportedClasses for the trap this guards.
+                var labels = m_labelsAsset != null
+                    ? m_labelsAsset.text.Split('\n')
+                    : System.Array.Empty<string>();
+                m_allowedClassIds = SupportedClasses.Resolve(labels);
+            }
+            return m_allowedClassIds;
         }
 
         private IEnumerator Start()
         {
             m_uiInference.SetLabels(m_labelsAsset);
+
+            // Slice 3 Task 5: do not spin an inference loop against a null engine.
+            if (m_modelLoadFailed)
+            {
+                Debug.LogError("[ObjectTagger] inference loop NOT started — model failed to load. No detections will be produced.");
+                yield break;
+            }
 
             while (true)
             {
@@ -86,6 +156,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void OnDestroy()
         {
+            // Slice 3 Task 5: upstream dereferenced m_engine unconditionally. If Awake
+            // threw, this threw AGAIN on teardown and masked the original error — the
+            // second exception is the one you see, and it points at the wrong place.
+            if (m_engine == null)
+            {
+                return;
+            }
+
             m_engine.PeekOutput(0)?.CompleteAllPendingOperations();
             m_engine.PeekOutput(1)?.CompleteAllPendingOperations();
             m_engine.PeekOutput(2)?.CompleteAllPendingOperations();
@@ -179,7 +257,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 yield break;
             }
 
-            NonMaxSuppression(m_detections, boxes, classIDs, scores, m_iouThreshold, m_scoreThreshold);
+            NonMaxSuppression(m_detections, boxes, classIDs, scores, m_iouThreshold, m_scoreThreshold, m_maxAcceptedDetections, GetAllowedClassIds());
 
             // Checking if spatial anchor is tracked ensures bounding boxes are placed at correct world space positIons.
             //
@@ -212,7 +290,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         //
         // maxAccepted is int.MaxValue here ON PURPOSE. Task 3 is a refactor and must not
         // change behaviour; upstream had no cap. Task 4 sets a real value.
-        private static void NonMaxSuppression(List<(int classId, Vector4 boundingBox, float score)> outDetections, Tensor<float> boxes, Tensor<int> classIDs, Tensor<float> scores, float iouThreshold, float scoreThreshold)
+        private static void NonMaxSuppression(List<(int classId, Vector4 boundingBox, float score)> outDetections, Tensor<float> boxes, Tensor<int> classIDs, Tensor<float> scores, float iouThreshold, float scoreThreshold, int maxAccepted, HashSet<int> allowedClassIds)
         {
             DetectionDecoder.SelectDetections(
                 boxes.AsReadOnlyNativeArray().AsReadOnlySpan(),
@@ -220,7 +298,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 scores.AsReadOnlyNativeArray().AsReadOnlySpan(),
                 iouThreshold,
                 scoreThreshold,
-                int.MaxValue,
+                maxAccepted,
+                allowedClassIds,
                 outDetections);
         }
 

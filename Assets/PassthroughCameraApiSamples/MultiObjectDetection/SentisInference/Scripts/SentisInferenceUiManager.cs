@@ -77,10 +77,42 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
         }
 
+        /// Object Tagger slice 3 Task 4: the single guarded label lookup.
+        ///
+        /// Upstream indexed m_labels at TWO sites with no bounds check. An out-of-range
+        /// classId threw IndexOutOfRange from deep inside the draw loop, which on device
+        /// reads as "detection stopped working" rather than "the labels file is wrong".
+        private string LabelFor(int classId)
+        {
+            if (m_labels == null || classId < 0 || classId >= m_labels.Length)
+            {
+                Debug.LogError($"[ObjectTagger] class id {classId} is outside the label range (labels={m_labels?.Length ?? 0}).");
+                return $"class_{classId}";
+            }
+            return m_labels[classId].Replace(" ", "_");
+        }
+
         public void SetLabels(TextAsset labelsAsset)
         {
             // Parse neural net labels
-            m_labels = labelsAsset.text.Split('\n');
+            // Object Tagger slice 3 Task 4: drop the trailing empty entry at parse time.
+            //
+            // SentisYoloClasses.txt is 80 classes but ENDS WITH A NEWLINE, so the naive
+            // Split yields 81 entries with an empty last one. Harmless while ArgMax can
+            // only produce 0-79, but it makes m_labels.Length lie, and slice 3 both
+            // validates against that length and filters the class set.
+            var rawLabels = labelsAsset.text.Split('\n');
+            var parsed = new List<string>(rawLabels.Length);
+            foreach (var raw in rawLabels)
+            {
+                var name = raw.Trim();
+                if (!string.IsNullOrEmpty(name))
+                {
+                    parsed.Add(name);
+                }
+            }
+            m_labels = parsed.ToArray();
+            Debug.Log($"[ObjectTagger] labels parsed: {m_labels.Length} usable of {rawLabels.Length} raw entries.");
         }
 
         // Object Tagger slice 3 Task 2: signature widened to carry the score.
@@ -118,7 +150,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 Vector2 center = currentResolution * (normalizedCenter - Vector2.one * 0.5f);
 
                 // Get the object class name
-                var classname = m_labels[detection.classId].Replace(" ", "_");
+                var classname = LabelFor(detection.classId);
 
                 // Get the 3D marker world position using Depth Raycast
                 var ray = m_cameraAccess.ViewportPointToRay(new Vector2(normalizedCenter.x, 1.0f - normalizedCenter.y), cameraPose);
@@ -229,7 +261,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // Create a new box
             var newData = GetBoxFromPoolOrCreate();
             newData.ClassId = classId;
-            newData.ClassName = m_labels[classId].Replace(" ", "_");
+            newData.ClassName = LabelFor(classId);
             m_boxDrawn.Add(newData);
             return newData;
         }

@@ -47,18 +47,34 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             float iouThreshold,
             float scoreThreshold,
             int maxAccepted,
+            HashSet<int> allowedClassIds,
             List<(int classId, Vector4 boundingBox, float score)> outDetections)
         {
             outDetections.Clear();
 
-            // Filter by score threshold first. `>=` matches upstream — do not tighten it.
+            // Filter by score threshold AND curated class in the same pass. `>=` matches
+            // upstream — do not tighten it.
+            //
+            // ORDERING IS LOAD-BEARING: curation happens HERE, before the sort and before
+            // the acceptance cap. Filtering later — at the label-lookup site, say — would
+            // let unsupported classes consume cap slots and then be discarded, so the cap
+            // would silently under-deliver supported detections. That failure reads as a
+            // detection problem, not a filtering one.
+            //
+            // A null or empty set means "no curation", which preserves upstream behaviour.
+            var curating = allowedClassIds != null && allowedClassIds.Count > 0;
             var filteredIndices = new List<int>();
             for (var i = 0; i < scores.Length; i++)
             {
-                if (scores[i] >= scoreThreshold)
+                if (scores[i] < scoreThreshold)
                 {
-                    filteredIndices.Add(i);
+                    continue;
                 }
+                if (curating && !allowedClassIds.Contains(classIds[i]))
+                {
+                    continue;
+                }
+                filteredIndices.Add(i);
             }
 
             if (filteredIndices.Count == 0)

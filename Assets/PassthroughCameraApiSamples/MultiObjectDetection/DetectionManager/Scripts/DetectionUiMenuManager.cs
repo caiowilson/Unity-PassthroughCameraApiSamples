@@ -119,6 +119,22 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             UpdateLabelInformation();
         }
 
+        // Object Tagger slice 3 Task 5 — model load failure, surfaced.
+        private bool m_modelLoadFailed;
+
+        /// A failed model load leaves the app running with passthrough working and
+        /// nothing ever labelled — indistinguishable on device from an untracked anchor
+        /// or a denied permission. This makes it say which one it is.
+        public void SetModelLoadFailed(bool failed)
+        {
+            if (m_modelLoadFailed == failed)
+            {
+                return;
+            }
+            m_modelLoadFailed = failed;
+            UpdateLabelInformation();
+        }
+
         private void UpdateLabelInformation()
         {
             // The version string was hardcoded to "2.1.3" upstream. The pinned package
@@ -130,8 +146,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 ? string.Empty
                 : "\n<<< SPATIAL ANCHOR NOT TRACKED - detections are being discarded >>>";
 
+            // Model-load failure outranks the anchor line: if the model never loaded,
+            // the anchor state is irrelevant because no inference runs at all.
+            var modelLine = m_modelLoadFailed
+                ? "\n<<< MODEL FAILED TO LOAD - no inference is running >>>"
+                : string.Empty;
+
             m_labelInformation.text =
-                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}\nObjects identified: {m_objectsIdentified}{anchorLine}";
+                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}\nObjects identified: {m_objectsIdentified}{modelLine}{anchorLine}";
         }
 
         public void OnObjectsDetected(int objects)

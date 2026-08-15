@@ -21,10 +21,11 @@ namespace ObjectTagger.Tests.EditMode
 
         private static List<(int classId, Vector4 boundingBox, float score)> Run(
             float[] boxes, int[] classIds, float[] scores,
-            float iou = 0.6f, float scoreThreshold = 0.23f, int maxAccepted = int.MaxValue)
+            float iou = 0.6f, float scoreThreshold = 0.23f, int maxAccepted = int.MaxValue,
+            HashSet<int> allowed = null)
         {
             var outList = new List<(int classId, Vector4 boundingBox, float score)>();
-            DetectionDecoder.SelectDetections(boxes, classIds, scores, iou, scoreThreshold, maxAccepted, outList);
+            DetectionDecoder.SelectDetections(boxes, classIds, scores, iou, scoreThreshold, maxAccepted, allowed, outList);
             return outList;
         }
 
@@ -123,10 +124,55 @@ namespace ObjectTagger.Tests.EditMode
             // cleared, detections would accumulate forever.
             var outList = new List<(int classId, Vector4 boundingBox, float score)> { (99, Vector4.zero, 1f) };
             DetectionDecoder.SelectDetections(
-                TwoDisjointBoxes(), new[] { 0, 1 }, new[] { 0.9f, 0.8f }, 0.6f, 0.23f, int.MaxValue, outList);
+                TwoDisjointBoxes(), new[] { 0, 1 }, new[] { 0.9f, 0.8f }, 0.6f, 0.23f, int.MaxValue, null, outList);
 
             Assert.AreEqual(2, outList.Count, "stale entry from a previous frame must not survive");
             CollectionAssert.DoesNotContain(outList.ConvertAll(d => d.classId), 99);
+        }
+
+        [Test]
+        public void CuratedClassSurvivesAndUncuratedIsDropped()
+        {
+            var kept = Run(TwoDisjointBoxes(), new[] { 5, 77 }, new[] { 0.9f, 0.8f },
+                allowed: new HashSet<int> { 5 });
+
+            Assert.AreEqual(1, kept.Count, "only the curated class should survive");
+            Assert.AreEqual(5, kept[0].classId);
+        }
+
+        [Test]
+        public void NullOrEmptyCurationSetMeansNoCuration()
+        {
+            // Preserves upstream behaviour when curation is switched off. An empty set
+            // must NOT mean "reject everything", or disabling curation would silently
+            // blank the app.
+            Assert.AreEqual(2, Run(TwoDisjointBoxes(), new[] { 5, 77 }, new[] { 0.9f, 0.8f }, allowed: null).Count);
+            Assert.AreEqual(2, Run(TwoDisjointBoxes(), new[] { 5, 77 }, new[] { 0.9f, 0.8f }, allowed: new HashSet<int>()).Count);
+        }
+
+        [Test]
+        public void CurationIsAppliedBeforeTheAcceptanceCap()
+        {
+            // THE ORDERING THE IMPLEMENTATION DEPENDS ON. If uncurated classes were
+            // filtered after the cap, they would consume cap slots and the cap would
+            // silently under-deliver supported detections — which on device reads as a
+            // detection failure, not a filtering one.
+            //
+            // Three candidates, highest two scores both UNCURATED, cap of 1. Correct
+            // behaviour keeps the curated one. Broken ordering yields nothing.
+            var boxes = new float[]
+            {
+                0f, 0f, 10f, 10f,
+                100f, 100f, 110f, 110f,
+                200f, 200f, 210f, 210f,
+            };
+
+            var kept = Run(boxes, new[] { 70, 71, 5 }, new[] { 0.99f, 0.95f, 0.30f },
+                maxAccepted: 1, allowed: new HashSet<int> { 5 });
+
+            Assert.AreEqual(1, kept.Count, "the curated detection must still be delivered");
+            Assert.AreEqual(5, kept[0].classId,
+                "uncurated classes must not consume the acceptance cap");
         }
 
         [Test]
