@@ -39,6 +39,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // multi-minute gate run.
         private int m_raycastAttempts;
         private int m_raycastMisses;
+
+        /// Slice 4 Task 1: counted apart from m_raycastMisses on purpose. These are
+        /// subsystem faults, not depth quality, and mixing them corrupts the rate.
+        private int m_depthSubsystemUnavailable;
         private int m_detectionsSeen;
         private float m_nextCountLogTime;
 
@@ -51,13 +55,23 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
             m_nextCountLogTime = Time.time + logIntervalSeconds;
 
-            var missRate = m_raycastAttempts > 0
-                ? (100f * m_raycastMisses / m_raycastAttempts).ToString("F1")
+            // Denominator EXCLUDES subsystem-unavailable frames. They are counted as
+            // attempts (they were attempted) but including them here would DEFLATE the
+            // rate: a run where depth was off entirely would report a low miss rate
+            // rather than an undefined one. The rate answers "when depth was working,
+            // how often did it fail to resolve?" — nothing else.
+            var qualified = m_raycastAttempts - m_depthSubsystemUnavailable;
+            var missRate = qualified > 0
+                ? (100f * m_raycastMisses / qualified).ToString("F1")
                 : "n/a";
 
+            // The rate deliberately EXCLUDES subsystem-unavailable frames — it is a
+            // depth-quality figure, and a subsystem fault is not a quality problem.
+            // Reported alongside so a non-zero value is impossible to miss.
             Debug.Log($"[ObjectTagger] counts: detections={m_detectionsSeen} " +
                       $"raycastAttempts={m_raycastAttempts} raycastMisses={m_raycastMisses} " +
-                      $"missRate={missRate}% boxesDrawn={m_boxDrawn.Count}");
+                      $"missRate={missRate}% subsystemUnavailable={m_depthSubsystemUnavailable} " +
+                      $"boxesDrawn={m_boxDrawn.Count}");
         }
 
         private void Update()
@@ -154,21 +168,33 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
                 // Get the 3D marker world position using Depth Raycast
                 var ray = m_cameraAccess.ViewportPointToRay(new Vector2(normalizedCenter.x, 1.0f - normalizedCenter.y), cameraPose);
-                var worldPos = m_environmentRaycast.Raycast(ray);
+                var depth = m_environmentRaycast.ResolveDepth(ray);
 
                 // Object Tagger slice 2 Task 5: count attempts, not just failures.
                 // Upstream logs raycast FAILURES and never a total, so no failure RATE is
                 // derivable -- slice 1 recorded 10 absolute failures with no denominator.
-                // Slice 4's gate requires a depth-miss rate, so the denominator has to
-                // start being recorded here.
                 m_raycastAttempts++;
 
-                if (!worldPos.HasValue)
+                // Slice 4 Task 1 Step 3: the two failure causes are counted SEPARATELY.
+                //
+                // Slice 2 reported 0.9% and that number assumed every miss was a
+                // per-detection miss. Folding subsystem-unavailable frames into the same
+                // counter would inflate the numerator toward 100% and produce a figure
+                // that describes nothing -- "depth is bad" when the truth is "depth is off".
+                if (depth.Status == DepthResolveStatus.SubsystemUnavailable)
+                {
+                    m_depthSubsystemUnavailable++;
+                    continue;
+                }
+
+                if (!depth.IsHit)
                 {
                     m_raycastMisses++;
                     Debug.Log($"RaycastManager failed, ray:{ray}, cameraPose:{cameraPose}");
                     continue;
                 }
+
+                var worldPos = (Vector3?)depth.Point;
                 var normRect = new Rect(
                     rect.x / inputSize.x,
                     1f - rect.yMax / inputSize.y,
