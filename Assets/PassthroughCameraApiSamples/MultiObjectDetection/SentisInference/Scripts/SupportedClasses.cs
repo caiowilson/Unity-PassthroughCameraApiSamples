@@ -48,6 +48,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             "tvmonitor", "laptop", "mouse", "remote", "keyboard", "cell phone", "book", "clock",
             // carried items
             "backpack", "handbag", "suitcase", "tie", "teddy bear",
+            // kitchen and bathroom fixtures
+            //
+            // ADDED after slice 2/3 device runs detected `refrigerator` and `toothbrush`
+            // while both sat outside the curated set, so the app would have declined to
+            // label objects it demonstrably recognises.
+            //
+            // The concern about adding them was curve-fitting curation to whatever the
+            // test room happened to contain. That concern is real but does not apply
+            // here: kitchens and bathrooms are ordinary rooms, and both objects are
+            // indoor items that belong in an indoor-weighted set on their own merits.
+            // The device run did not DEFINE the set; it REVEALED an omission in it.
+            "refrigerator", "toothbrush", "sink", "microwave", "oven",
         };
 
         /// Resolve the curated names against the labels actually loaded from the

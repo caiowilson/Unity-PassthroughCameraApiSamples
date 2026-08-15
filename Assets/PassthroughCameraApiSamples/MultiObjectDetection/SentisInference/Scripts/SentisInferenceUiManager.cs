@@ -43,6 +43,73 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         /// Slice 4 Task 1: counted apart from m_raycastMisses on purpose. These are
         /// subsystem faults, not depth quality, and mixing them corrupts the rate.
         private int m_depthSubsystemUnavailable;
+
+        [Header("Depth sampling (slice 4 Task 3)")]
+        /// Rays cast per detection. DEFAULT 1 IS BEHAVIOUR-NEUTRAL — it is exactly
+        /// upstream's single centre ray. Raising it probes a small pattern around the
+        /// centre and takes the median by distance, which is the fix for a centre ray
+        /// slipping past a chair onto the wall behind. Do not raise it without an
+        /// on-device baseline to prove the offset improved.
+        [SerializeField, Range(1, 5)] private int m_depthSamplesPerDetection = 1;
+
+        /// Sample spread in NORMALISED viewport units.
+        [SerializeField, Range(0.005f, 0.15f)] private float m_depthSampleSpread = 0.03f;
+
+        private readonly Vector3[] m_depthSampleBuffer = new Vector3[5];
+
+        /// Probe depth around a detection centre and pick a representative point.
+        ///
+        /// Outcome accounting, which decides what the miss rate means:
+        ///   ANY sample resolving  -> Hit. One detection, one attempt, succeeded.
+        ///   ALL samples missing   -> Miss.
+        ///   ANY subsystem-unavailable -> SubsystemUnavailable, and it short-circuits:
+        ///     the subsystem is down for every ray, so probing the rest is pointless
+        ///     and would let one detection inflate that counter N times.
+        private DepthResolveStatus ProbeDepth(Vector2 normalizedCenter, Pose cameraPose, out Vector3 point)
+        {
+            point = Vector3.zero;
+
+            var sampleCount = Mathf.Clamp(m_depthSamplesPerDetection, 1, m_depthSampleBuffer.Length);
+            var offsets = DetectionProjection.SampleOffsets(m_depthSampleSpread);
+            var resolved = 0;
+
+            for (var s = 0; s < sampleCount; s++)
+            {
+                // SampleOffsets returns centre-first, so sampleCount==1 is exactly the
+                // upstream centre ray.
+                var probe = normalizedCenter + offsets[s];
+                var ray = m_cameraAccess.ViewportPointToRay(
+                    DetectionProjection.ToViewportPoint(probe), cameraPose);
+
+                var result = m_environmentRaycast.ResolveDepth(ray);
+
+                if (result.Status == DepthResolveStatus.SubsystemUnavailable)
+                {
+                    return DepthResolveStatus.SubsystemUnavailable;
+                }
+
+                if (result.IsHit)
+                {
+                    m_depthSampleBuffer[resolved++] = result.Point;
+                }
+            }
+
+            m_depthRaysCast += sampleCount;
+
+            if (resolved == 0)
+            {
+                return DepthResolveStatus.Miss;
+            }
+
+            return DetectionProjection.TryPickRepresentativePoint(
+                m_depthSampleBuffer, resolved, cameraPose.position, out point)
+                ? DepthResolveStatus.Hit
+                : DepthResolveStatus.Miss;
+        }
+
+        /// Recorded so a future miss-rate or performance comparison is not silently
+        /// apples-to-oranges once the sample count stops being 1.
+        private int m_depthRaysCast;
         private int m_detectionsSeen;
         private float m_nextCountLogTime;
 
@@ -68,10 +135,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // The rate deliberately EXCLUDES subsystem-unavailable frames — it is a
             // depth-quality figure, and a subsystem fault is not a quality problem.
             // Reported alongside so a non-zero value is impossible to miss.
+            // raysPerDetection is reported so a future comparison against slice 2's 0.9%
+            // is not silently apples-to-oranges once the sample count stops being 1.
+            var raysPerDetection = m_raycastAttempts > 0
+                ? ((float)m_depthRaysCast / m_raycastAttempts).ToString("F1")
+                : "n/a";
+
             Debug.Log($"[ObjectTagger] counts: detections={m_detectionsSeen} " +
                       $"raycastAttempts={m_raycastAttempts} raycastMisses={m_raycastMisses} " +
                       $"missRate={missRate}% subsystemUnavailable={m_depthSubsystemUnavailable} " +
-                      $"boxesDrawn={m_boxDrawn.Count}");
+                      $"raysPerDetection={raysPerDetection} boxesDrawn={m_boxDrawn.Count}");
         }
 
         private void Update()
@@ -166,13 +239,25 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // Get the object class name
                 var classname = LabelFor(detection.classId);
 
-                // Get the 3D marker world position using Depth Raycast
-                var ray = m_cameraAccess.ViewportPointToRay(new Vector2(normalizedCenter.x, 1.0f - normalizedCenter.y), cameraPose);
-                var depth = m_environmentRaycast.ResolveDepth(ray);
+                // Get the 3D marker world position using Depth Raycast.
+                //
+                // Slice 4 Task 3: probes m_depthSamplesPerDetection rays around the box
+                // centre and takes the MEDIAN by distance. DEFAULT IS 1, which is exactly
+                // upstream's single centre ray — the mechanism is built but not pulled,
+                // because the plan requires measuring the current offset on device before
+                // changing placement. Raise the sample count only with a baseline to
+                // improve against.
+                var sampleStatus = ProbeDepth(normalizedCenter, cameraPose, out var resolvedPoint);
 
                 // Object Tagger slice 2 Task 5: count attempts, not just failures.
                 // Upstream logs raycast FAILURES and never a total, so no failure RATE is
                 // derivable -- slice 1 recorded 10 absolute failures with no denominator.
+                //
+                // ONE DETECTION IS ONE ATTEMPT regardless of how many rays it took. If
+                // attempts counted rays, moving from 1 to 5 samples would multiply the
+                // denominator fivefold and make the rate incomparable with slice 2's
+                // recorded 0.9%. The rate answers "how often did a DETECTION fail to
+                // resolve", which is the question slice 4's gate asks.
                 m_raycastAttempts++;
 
                 // Slice 4 Task 1 Step 3: the two failure causes are counted SEPARATELY.
@@ -181,16 +266,25 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // per-detection miss. Folding subsystem-unavailable frames into the same
                 // counter would inflate the numerator toward 100% and produce a figure
                 // that describes nothing -- "depth is bad" when the truth is "depth is off".
-                if (depth.Status == DepthResolveStatus.SubsystemUnavailable)
+                if (sampleStatus == DepthResolveStatus.SubsystemUnavailable)
                 {
                     m_depthSubsystemUnavailable++;
                     continue;
                 }
 
+                var depth = sampleStatus == DepthResolveStatus.Hit
+                    ? DepthResolveResult.Hit(resolvedPoint)
+                    : DepthResolveResult.Miss();
+
                 if (!depth.IsHit)
                 {
                     m_raycastMisses++;
-                    Debug.Log($"RaycastManager failed, ray:{ray}, cameraPose:{cameraPose}");
+                    // The individual rays now live inside ProbeDepth, so log the box
+                    // centre that generated them instead. More useful anyway: it says
+                    // WHERE on screen the detection failed to resolve, which is what a
+                    // depth-miss investigation actually needs.
+                    Debug.Log($"[ObjectTagger] depth miss for '{classname}' at normalizedCenter:{normalizedCenter}, " +
+                              $"samples:{m_depthSamplesPerDetection}, cameraPose:{cameraPose}");
                     continue;
                 }
 
