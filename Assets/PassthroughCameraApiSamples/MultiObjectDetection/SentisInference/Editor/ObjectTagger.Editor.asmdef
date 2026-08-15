@@ -1,0 +1,20 @@
+{
+    "name": "ObjectTagger.Editor",
+    "rootNamespace": "",
+    "references": [
+        "ObjectTagger.Runtime",
+        "Oculus.VR",
+        "Unity.InferenceEngine"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
