@@ -11,6 +11,7 @@
 // Per deviation D2 the order is NOT changed: StartScene must remain index 0,
 // because StartMenu.cs enumerates from index 1 and performs the model warm-up.
 
+using System.IO;
 using System.Linq;
 using UnityEditor;
 using UnityEditor.Build;
@@ -19,6 +20,44 @@ using UnityEngine;
 
 public static class BaselineBuild
 {
+    private const string OutPathArg = "-objectTaggerBuildOut";
+
+    // Object Tagger slice 2, deviation D12.
+    //
+    // The output path used to be a hardcoded absolute path to ONE fixed filename.
+    // That had two problems, and the second one destroyed evidence: it only worked
+    // on this machine, and because every build wrote the same file, the slice 2
+    // build overwrote slice 1's APK. That is precisely why the ~23 MB size delta
+    // between the two cannot be attributed -- there is no longer an artifact to
+    // diff against.
+    //
+    // Gate and evidence builds MUST pass -objectTaggerBuildOut <path> so their APK
+    // survives under a name identifying what produced it. Builds without it go to a
+    // clearly-labelled dev artifact that is expected to be overwritten.
+    //
+    // The default stays inside <repo-parent>/build, matching where slice 1's
+    // evidence was recorded, but is now derived from the project location rather
+    // than hardcoded, so it works on any machine.
+    private static string ResolveOutputPath()
+    {
+        var args = System.Environment.GetCommandLineArgs();
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (args[i] == OutPathArg)
+            {
+                Debug.Log($"[BaselineBuild] output path from {OutPathArg}: {args[i + 1]}");
+                return args[i + 1];
+            }
+        }
+
+        var projectRoot = Directory.GetParent(Application.dataPath).FullName;
+        var buildDir = Path.Combine(Directory.GetParent(projectRoot).FullName, "build");
+        _ = Directory.CreateDirectory(buildDir);
+        var fallback = Path.Combine(buildDir, "ObjectTagger-dev.apk");
+        Debug.LogWarning($"[BaselineBuild] {OutPathArg} not supplied; writing the overwritable dev artifact at {fallback}. Pass {OutPathArg} for any build whose APK is evidence.");
+        return fallback;
+    }
+
     public static void BuildAndroid()
     {
         var scenes = EditorBuildSettings.scenes
@@ -43,7 +82,7 @@ public static class BaselineBuild
         EditorUserBuildSettings.development = true;
         Debug.Log($"[BaselineBuild] textureCompression={EditorUserBuildSettings.androidBuildSubtarget} development={EditorUserBuildSettings.development}");
 
-        var outPath = "/Users/caiowilson/Work/upstream/build/MultiObjectDetectionBaseline.apk";
+        var outPath = ResolveOutputPath();
 
         var opts = new BuildPlayerOptions
         {
