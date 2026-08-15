@@ -204,88 +204,32 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_uiInference.DrawUIBoxes(m_detections, m_inputSize, cachedCameraPose);
         }
 
+        // Object Tagger slice 3 Task 3: this is now a THIN ADAPTER.
+        //
+        // It does the one thing that genuinely needs Inference Engine types — unwrap the
+        // tensors — and hands plain spans to DetectionDecoder. All the decoding logic
+        // lives there, reachable from edit-mode tests with nothing but arrays.
+        //
+        // maxAccepted is int.MaxValue here ON PURPOSE. Task 3 is a refactor and must not
+        // change behaviour; upstream had no cap. Task 4 sets a real value.
         private static void NonMaxSuppression(List<(int classId, Vector4 boundingBox, float score)> outDetections, Tensor<float> boxes, Tensor<int> classIDs, Tensor<float> scores, float iouThreshold, float scoreThreshold)
         {
-            outDetections.Clear();
-
-            // Filter by score threshold first
-            List<int> filteredIndices = new List<int>();
-            NativeArray<float>.ReadOnly scoresArray = scores.AsReadOnlyNativeArray();
-            for (int i = 0; i < scoresArray.Length; i++)
-            {
-                if (scoresArray[i] >= scoreThreshold)
-                {
-                    filteredIndices.Add(i);
-                }
-            }
-
-            if (filteredIndices.Count == 0)
-            {
-                return;
-            }
-
-            // Sort filtered indices by scores in descending order
-            filteredIndices.Sort((a, b) => scoresArray[b].CompareTo(scoresArray[a]));
-
-            // Apply NMS algorithm
-            bool[] suppressed = new bool[filteredIndices.Count];
-            for (int i = 0; i < filteredIndices.Count; i++)
-            {
-                if (suppressed[i])
-                    continue;
-
-                int idx = filteredIndices[i];
-
-                // Add this detection to results
-                // scoresArray[idx] is already in hand here -- it was used to filter above
-                // and to sort the list. Upstream simply discarded it at this line.
-                outDetections.Add((classIDs[idx], GetBox(idx), scoresArray[idx]));
-
-                // Suppress overlapping boxes regardless of class
-                for (int j = i + 1; j < filteredIndices.Count; j++)
-                {
-                    if (suppressed[j])
-                        continue;
-
-                    int jdx = filteredIndices[j];
-
-                    float iou = CalculateIoU(GetBox(idx), GetBox(jdx));
-                    if (iou > iouThreshold)
-                    {
-                        suppressed[j] = true;
-                    }
-                }
-            }
-
-            Vector4 GetBox(int i) => new Vector4(boxes[i, 0], boxes[i, 1], boxes[i, 2], boxes[i, 3]);
+            DetectionDecoder.SelectDetections(
+                boxes.AsReadOnlyNativeArray().AsReadOnlySpan(),
+                classIDs.AsReadOnlyNativeArray().AsReadOnlySpan(),
+                scores.AsReadOnlyNativeArray().AsReadOnlySpan(),
+                iouThreshold,
+                scoreThreshold,
+                int.MaxValue,
+                outDetections);
         }
 
-        internal static float CalculateIoU(Vector4 boxA, Vector4 boxB)
-        {
-            // Boxes are in format (topLeftX, topLeftY, bottomRightX, bottomRightY)
-            // Calculate intersection coordinates
-            float x1 = Mathf.Max(boxA.x, boxB.x);
-            float y1 = Mathf.Max(boxA.y, boxB.y);
-            float x2 = Mathf.Min(boxA.z, boxB.z);
-            float y2 = Mathf.Min(boxA.w, boxB.w);
+        /// Forwarder kept so the two callers in SentisInferenceUiManager keep compiling
+        /// untouched. Those are the cross-frame ASSOCIATION test that spec line 55
+        /// replaces in slice 5, distinct from the intra-frame suppression use — slice 3
+        /// must not alter them.
+        internal static float CalculateIoU(Vector4 boxA, Vector4 boxB) =>
+            DetectionDecoder.CalculateIoU(boxA, boxB);
 
-            // Calculate intersection area
-            float intersectionWidth = Mathf.Max(0, x2 - x1);
-            float intersectionHeight = Mathf.Max(0, y2 - y1);
-            float intersectionArea = intersectionWidth * intersectionHeight;
-
-            // Calculate individual box areas
-            float boxAArea = (boxA.z - boxA.x) * (boxA.w - boxA.y);
-            float boxBArea = (boxB.z - boxB.x) * (boxB.w - boxB.y);
-
-            // Calculate union area
-            float unionArea = boxAArea + boxBArea - intersectionArea;
-
-            // Return IoU (Intersection over Union)
-            if (unionArea == 0)
-                return 0;
-
-            return intersectionArea / unionArea;
-        }
     }
 }
