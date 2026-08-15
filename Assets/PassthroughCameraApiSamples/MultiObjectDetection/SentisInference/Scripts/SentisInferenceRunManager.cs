@@ -40,6 +40,29 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [Header("Class curation")]
         [SerializeField] private bool m_curateClasses = true;
 
+        // Object Tagger slice 4 Task 4 — inference cadence control (spec line 76).
+        //
+        // Upstream ran inference as fast as the coroutine allowed, with no pacing.
+        // Spec line 76 assigns this lever to slice 4 so slice 6 can TUNE it rather than
+        // build it under performance pressure.
+        //
+        // DEFAULT 0 IS BEHAVIOUR-NEUTRAL: zero means "as fast as possible", exactly
+        // matching upstream. Slice 4 builds the lever; it does not pull it. Changing
+        // the default is a slice 6 decision backed by device measurement.
+        //
+        // The interval is measured from the START of one inference to the start of the
+        // next, which is what "cadence" means for latency purposes.
+        //
+        // CAUTION FOR SLICE 5 (spec line 76): confirmations x cadence IS
+        // label-appearance latency. Raising the confirmation count while lowering
+        // cadence silently breaks the acceptance criterion for how quickly a label
+        // appears. The effective cadence is logged at startup so slice 5 can bound
+        // its confirmation count against a real number.
+        [Header("Inference cadence")]
+        [SerializeField, Range(0f, 1f)] private float m_minSecondsBetweenInferences;
+
+        private float m_nextInferenceAllowedAt;
+
         [Header("UI display references")]
         [SerializeField] private SentisInferenceUiManager m_uiInference;
 
@@ -144,12 +167,30 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 yield break;
             }
 
+            Debug.Log($"[ObjectTagger] inference cadence: minSecondsBetweenInferences={m_minSecondsBetweenInferences:F3} " +
+                      $"({(m_minSecondsBetweenInferences <= 0f ? "uncapped, matches upstream" : $"max {1f / m_minSecondsBetweenInferences:F1} inferences/sec")}). " +
+                      "Slice 5: bound confirmation counts against this — confirmations x cadence IS label latency.");
+
             while (true)
             {
                 while (m_uiMenuManager.IsPaused)
                 {
                     yield return null;
                 }
+
+                // Slice 4 Task 4: pace the loop WITHOUT queuing.
+                //
+                // The performance policy requires using the newest frame and never
+                // queuing stale ones. Waiting here, before pulling a texture, preserves
+                // that: RunInference fetches a fresh frame when it finally runs, so a
+                // longer interval means fewer, newer frames — never a backlog of old
+                // ones. Putting the wait AFTER the texture fetch would invert that.
+                while (Time.realtimeSinceStartup < m_nextInferenceAllowedAt)
+                {
+                    yield return null;
+                }
+                m_nextInferenceAllowedAt = Time.realtimeSinceStartup + m_minSecondsBetweenInferences;
+
                 yield return RunInference();
             }
         }
