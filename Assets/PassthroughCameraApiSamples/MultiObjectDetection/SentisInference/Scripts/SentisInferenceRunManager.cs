@@ -38,9 +38,24 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void Awake()
         {
+            // Object Tagger slice 2: model warm-up re-homed here from StartMenu.Awake().
+            //
+            // Upstream ran PreloadModel in StartScene so the first-inference
+            // main-thread stall was absorbed before the detection scene opened. A
+            // single-scene app has no earlier scene, so the warm-up runs here instead
+            // -- still before Start()'s inference loop, which keeps the stall off the
+            // detection path rather than eliminating it.
+            //
+            // PreloadModel hardcodes BackendType.CPU regardless of m_backend. That is
+            // preserved verbatim; changing the backend is a slice 6 performance lever.
+            Debug.Log("[ObjectTagger] PreloadModel warm-up starting.");
+            PreloadModel(m_sentisModel);
+            Debug.Log("[ObjectTagger] PreloadModel warm-up complete.");
+
             var model = ModelLoader.Load(m_sentisModel);
             var inputShape = model.inputs[0].shape;
             m_inputSize = new Vector2Int(inputShape.Get(2), inputShape.Get(3));
+            Debug.Log($"[ObjectTagger] model input size = {m_inputSize.x}x{m_inputSize.y}, backend = {m_backend}");
             m_engine = new Worker(model, m_backend);
         }
 

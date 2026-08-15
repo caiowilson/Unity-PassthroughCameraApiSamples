@@ -5,7 +5,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using Meta.XR.Samples;
-using PassthroughCameraSamples.MultiObjectDetection;
 using Unity.InferenceEngine;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -19,9 +18,14 @@ namespace PassthroughCameraSamples.StartScene
         public OVROverlay Overlay;
         public OVROverlay Text;
         public OVRCameraRig VrRig;
+        // Object Tagger slice 2: the Awake() that called
+        // SentisInferenceRunManager.PreloadModel(m_objectDetectionModel) was removed
+        // and re-homed into SentisInferenceRunManager.Awake(). The warm-up must run
+        // exactly once; leaving it here as well would double it while StartScene is
+        // still present, and this whole scene is deleted in Task 3.
+        // The serialized field is retained so the scene asset's reference does not
+        // dangle before that deletion.
         [SerializeField] private ModelAsset m_objectDetectionModel;
-
-        private void Awake() => SentisInferenceRunManager.PreloadModel(m_objectDetectionModel);
 
         private void Start()
         {
