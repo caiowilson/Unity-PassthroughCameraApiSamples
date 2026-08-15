@@ -21,6 +21,7 @@
 // Deliberately free of MonoBehaviour and Inference Engine types so the policy
 // that consumes it stays reachable from edit-mode tests, per slice 3's seam.
 
+using Meta.XR;
 using UnityEngine;
 
 namespace PassthroughCameraSamples.MultiObjectDetection
@@ -65,5 +66,52 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         public static DepthResolveResult SubsystemUnavailable() =>
             new DepthResolveResult(DepthResolveStatus.SubsystemUnavailable, Vector3.zero);
+
+        /// Map an SDK raycast status onto our three-way outcome.
+        ///
+        /// PURE ON PURPOSE. This mapping is where D-slice4-1 lived: the first version
+        /// inferred the outcome from EnvironmentRaycastManager.IsSupported instead of
+        /// reading the status, and a Scene-permission denial would have been counted as
+        /// depth-quality misses. The fix was correct but sat inside a MonoBehaviour and
+        /// needed a live EnvironmentRaycastManager to exercise, so nothing guarded it.
+        ///
+        /// Extracting it here — the same seam move slice 3 made for decoding — means the
+        /// branching is covered by edit-mode tests. Code that has already carried one
+        /// defect is the last place to leave untested.
+        public static DepthResolveResult FromRaycastStatus(EnvironmentRaycastHitStatus status, Vector3 point)
+        {
+            switch (status)
+            {
+                case EnvironmentRaycastHitStatus.Hit:
+                    return Hit(point);
+
+                // Subsystem-level: affects every detection equally and no amount of
+                // looking around fixes it. MUST stay out of the depth-miss rate.
+                //
+                // NotReady is the one that mattered: Scene permission gates handle
+                // creation, and the SDK's Raycast() checks !IsReady BEFORE IsSupported,
+                // so a permission denial arrives here and nowhere else.
+                case EnvironmentRaycastHitStatus.NotReady:
+                case EnvironmentRaycastHitStatus.NotSupported:
+                    return SubsystemUnavailable();
+
+                // Genuine per-detection outcomes: the system worked, this ray did not
+                // yield a usable point.
+                //
+                // HitPointOccluded populates a point, but the object's true surface lies
+                // BEYOND that first occluded point, so placing a label there would put it
+                // short. Deliberately a miss rather than a hit.
+                case EnvironmentRaycastHitStatus.NoHit:
+                case EnvironmentRaycastHitStatus.RayOccluded:
+                case EnvironmentRaycastHitStatus.HitPointOccluded:
+                case EnvironmentRaycastHitStatus.HitPointOutsideOfCameraFrustum:
+                    return Miss();
+
+                // A status added by a future SDK version lands here. Treated as a miss,
+                // not a hit: an unknown status must never produce a world position.
+                default:
+                    return Miss();
+            }
+        }
     }
 }

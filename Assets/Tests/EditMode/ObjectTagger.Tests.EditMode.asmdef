@@ -3,6 +3,7 @@
     "rootNamespace": "",
     "references": [
         "ObjectTagger.Runtime",
+        "meta.xr.mrutilitykit",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner"
     ],

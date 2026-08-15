@@ -70,33 +70,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             //
             // The SDK already publishes the distinction through hit.status; the bug was
             // reading only the bool return and inferring the rest. Branch on the status.
+            // Thin adapter: perform the platform call, then hand the STATUS to the pure
+            // mapper. The mapping itself is DepthResolveResult.FromRaycastStatus, where
+            // it is covered by edit-mode tests — this method cannot be, because it needs
+            // a live EnvironmentRaycastManager.
             _ = m_raycastManager.Raycast(ray, out var hitInfo);
 
-            switch (hitInfo.status)
+            var result = DepthResolveResult.FromRaycastStatus(hitInfo.status, hitInfo.point);
+
+            if (result.Status == DepthResolveStatus.SubsystemUnavailable)
             {
-                case EnvironmentRaycastHitStatus.Hit:
-                    return DepthResolveResult.Hit(hitInfo.point);
-
-                // Subsystem-level: affects every detection equally, and no amount of
-                // looking around fixes it. Must NOT enter the depth-miss rate.
-                case EnvironmentRaycastHitStatus.NotReady:
-                case EnvironmentRaycastHitStatus.NotSupported:
-                    LogUnavailableOnce(hitInfo.status);
-                    return DepthResolveResult.SubsystemUnavailable();
-
-                // Genuine per-detection outcomes: the system was working and this
-                // particular ray did not yield a usable point.
-                //
-                // HitPointOccluded populates hit.point with the first occluded point,
-                // but the object's true surface is beyond it, so using that point would
-                // place the label short. Treated as a miss deliberately.
-                case EnvironmentRaycastHitStatus.NoHit:
-                case EnvironmentRaycastHitStatus.RayOccluded:
-                case EnvironmentRaycastHitStatus.HitPointOccluded:
-                case EnvironmentRaycastHitStatus.HitPointOutsideOfCameraFrustum:
-                default:
-                    return DepthResolveResult.Miss();
+                LogUnavailableOnce(hitInfo.status);
             }
+
+            return result;
         }
 
         private void LogUnavailableOnce(EnvironmentRaycastHitStatus status)
