@@ -171,7 +171,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             NonMaxSuppression(m_detections, boxes, classIDs, scores, m_iouThreshold, m_scoreThreshold);
 
             // Checking if spatial anchor is tracked ensures bounding boxes are placed at correct world space positIons.
-            if (!m_cameraAccess.IsPlaying || m_detectionManager.m_spatialAnchor == null || !m_detectionManager.m_spatialAnchor.IsTracked)
+            //
+            // Object Tagger slice 2 Task 5: this guard is the project's most dangerous
+            // silent failure. Inference and NMS have ALREADY run by this line, so a
+            // COMPLETED result is discarded here and nothing renders, with no error.
+            // Surfacing the anchor verdict turns that absence into something visible.
+            //
+            // Note the original condition is three-way: a camera that never started --
+            // i.e. a permission failure -- presents identically to an untracked anchor.
+            // The two are separated here so the UI reports only the anchor.
+            var anchorTracked = m_detectionManager.m_spatialAnchor != null
+                                && m_detectionManager.m_spatialAnchor.IsTracked;
+            m_uiMenuManager.SetAnchorTracked(anchorTracked);
+
+            if (!m_cameraAccess.IsPlaying || !anchorTracked)
             {
                 yield break;
             }

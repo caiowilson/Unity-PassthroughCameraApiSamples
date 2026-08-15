@@ -34,8 +34,36 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void Awake() => m_detectionBoxPrefab.gameObject.SetActive(false);
 
+        // Object Tagger slice 2 Task 5 — detection and depth-raycast counters.
+        // Emitted periodically rather than per-frame so the log stays readable over a
+        // multi-minute gate run.
+        private int m_raycastAttempts;
+        private int m_raycastMisses;
+        private int m_detectionsSeen;
+        private float m_nextCountLogTime;
+
+        private void LogCountsIfDue()
+        {
+            const float logIntervalSeconds = 10f;
+            if (Time.time < m_nextCountLogTime)
+            {
+                return;
+            }
+            m_nextCountLogTime = Time.time + logIntervalSeconds;
+
+            var missRate = m_raycastAttempts > 0
+                ? (100f * m_raycastMisses / m_raycastAttempts).ToString("F1")
+                : "n/a";
+
+            Debug.Log($"[ObjectTagger] counts: detections={m_detectionsSeen} " +
+                      $"raycastAttempts={m_raycastAttempts} raycastMisses={m_raycastMisses} " +
+                      $"missRate={missRate}% boxesDrawn={m_boxDrawn.Count}");
+        }
+
         private void Update()
         {
+            LogCountsIfDue();
+
             // Remove boxes that haven't been updated recently
             for (int i = m_boxDrawn.Count - 1; i >= 0; i--)
             {
@@ -66,6 +94,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
 
             OnObjectsDetected?.Invoke(detections.Count);
+            m_detectionsSeen += detections.Count;
 
             // Draw the bounding boxes
             for (var i = 0; i < detections.Count; i++)
@@ -87,8 +116,17 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // Get the 3D marker world position using Depth Raycast
                 var ray = m_cameraAccess.ViewportPointToRay(new Vector2(normalizedCenter.x, 1.0f - normalizedCenter.y), cameraPose);
                 var worldPos = m_environmentRaycast.Raycast(ray);
+
+                // Object Tagger slice 2 Task 5: count attempts, not just failures.
+                // Upstream logs raycast FAILURES and never a total, so no failure RATE is
+                // derivable -- slice 1 recorded 10 absolute failures with no denominator.
+                // Slice 4's gate requires a depth-miss rate, so the denominator has to
+                // start being recorded here.
+                m_raycastAttempts++;
+
                 if (!worldPos.HasValue)
                 {
+                    m_raycastMisses++;
                     Debug.Log($"RaycastManager failed, ray:{ray}, cameraPose:{cameraPose}");
                     continue;
                 }

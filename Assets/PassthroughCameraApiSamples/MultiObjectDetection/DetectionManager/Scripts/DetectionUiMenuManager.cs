@@ -99,9 +99,39 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         #endregion
 
         #region Ui state: detection information
+        // Object Tagger slice 2 Task 5: anchor-tracking state, surfaced here rather
+        // than in new UI. Reusing the existing information label is the smallest
+        // change that turns this project's most likely silent failure into
+        // something a tester can see. Label presentation proper is slice 5.
+        private bool m_anchorTracked = true;
+
+        /// Called when the spatial-anchor guard in SentisInferenceRunManager changes
+        /// verdict. While the anchor is untracked, inference still runs but every
+        /// result is discarded, so the app looks alive and renders nothing. Without
+        /// this the only symptom is absence.
+        public void SetAnchorTracked(bool tracked)
+        {
+            if (m_anchorTracked == tracked)
+            {
+                return;
+            }
+            m_anchorTracked = tracked;
+            UpdateLabelInformation();
+        }
+
         private void UpdateLabelInformation()
         {
-            m_labelInformation.text = $"Unity Sentis version: 2.1.3\nAI model: Yolo\nDetecting objects: {m_objectsDetected}\nObjects identified: {m_objectsIdentified}";
+            // The version string was hardcoded to "2.1.3" upstream. The pinned package
+            // is com.unity.ai.inference 2.2.1, so that display was simply wrong. Corrected
+            // rather than carried forward -- slice 2's gate re-answers what the app
+            // displays, and recording a known-wrong string as observed evidence would
+            // poison that answer. Logged as a deviation.
+            var anchorLine = m_anchorTracked
+                ? string.Empty
+                : "\n<<< SPATIAL ANCHOR NOT TRACKED - detections are being discarded >>>";
+
+            m_labelInformation.text =
+                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}\nObjects identified: {m_objectsIdentified}{anchorLine}";
         }
 
         public void OnObjectsDetected(int objects)
