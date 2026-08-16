@@ -38,10 +38,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // apart the moment one is reordered or removed from mid-list (exactly what
         // GetOrCreateBoxView's removal-during-iteration does below), and LabelRecord
         // itself must not hold a RectTransform. The pairing wrapper is what makes both
-        // constraints satisfiable at once. GetOrCreateBoxView still matches on
-        // RectTransform.InverseTransformPoint/sizeDelta (box *extent* still lives only
-        // in the view) — correct for Task 1 since Task 2 replaces this whole matching
-        // rule with class+world-distance matching over LabelRecord.WorldPosition.
+        // constraints satisfiable at once. Task 2 moved matching off the
+        // RectTransform entirely (class+world-distance over LabelRecord.WorldPosition,
+        // see LabelAssociation.cs) — the RectTransform here is now pure output, never
+        // read for matching.
         private class BoxView
         {
             public LabelRecord Record;
@@ -57,6 +57,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // from drifting apart. Private is enough: only sibling code in this file reads
         // it, and later tasks land in this same file.
         private const float GracePeriodSeconds = 3f;
+
+        // Object Tagger slice 5 Task 2 — the association distance threshold.
+        //
+        // The acceptance procedure places objects 1.5-2.5m from the camera; the
+        // plan calls for a threshold "in the tens of centimetres". 0.3m is chosen
+        // as the balance point: too large (e.g. 0.5m+) risks merging two
+        // neighbouring same-class objects into one label — a pair of chairs at a
+        // table is commonly closer together than that. Too small (e.g. <0.15m)
+        // spawns duplicate labels for the SAME object as the depth/position
+        // estimate jitters frame to frame, which slice 4's validation records
+        // show is on the order of several centimetres, not sub-centimetre. 0.3m
+        // sits comfortably above that jitter floor while staying well under
+        // typical same-class object spacing.
+        private const float AssociationDistanceMeters = 0.3f;
 
         private readonly List<BoxView> m_boxViews = new();
         private string[] m_labels;
@@ -347,7 +361,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     Mathf.Abs(bottomRightLocal.x - topLeftLocal.x),
                     Mathf.Abs(bottomRightLocal.y - topLeftLocal.y));
 
-                var view = GetOrCreateBoxView(detection.classId, worldSpaceCenter, size);
+                var view = GetOrCreateBoxView(detection.classId, worldSpaceCenter);
 
                 // Object Tagger slice 5 Task 1 Step 1: update the RECORD first — this is
                 // the state. WorldPosition is the world-space placement Task 2's matching
@@ -373,61 +387,50 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
         }
 
-        // Object Tagger slice 5 Task 1: still the IoU/RectTransform-based matching Task 2
-        // replaces with class+world-distance matching over LabelRecord.WorldPosition.
-        // Left untouched here on purpose — Task 1 is a state-shape change only, not a
-        // matching-rule change.
-        private BoxView GetOrCreateBoxView(int classId, Vector3 worldSpaceCenter, Vector2 worldSpaceSize)
+        // Object Tagger slice 5 Task 2: class+world-distance matching over
+        // LabelRecord.WorldPosition, replacing Task 1's IoU/RectTransform box-extent
+        // matching. The decision itself is pure logic in LabelAssociation.Decide —
+        // this method's job is just to snapshot m_boxViews into that function's
+        // input shape and act on the Decision it returns.
+        private BoxView GetOrCreateBoxView(int classId, Vector3 worldSpaceCenter)
         {
-            BoxView reusedView = null;
-            for (int i = m_boxViews.Count - 1; i >= 0; i--)
+            var existing = new LabelAssociation.Existing[m_boxViews.Count];
+            for (var i = 0; i < m_boxViews.Count; i++)
             {
-                var view = m_boxViews[i];
-                var localPos = view.RectTransform.InverseTransformPoint(worldSpaceCenter);
-                var newBox = new Vector4(
-                    localPos.x - worldSpaceSize.x * 0.5f,
-                    localPos.y - worldSpaceSize.y * 0.5f,
-                    localPos.x + worldSpaceSize.x * 0.5f,
-                    localPos.y + worldSpaceSize.y * 0.5f
-                );
-
-                var sizeDelta = view.RectTransform.sizeDelta;
-                var currentBox = new Vector4(
-                    -sizeDelta.x * 0.5f,
-                    -sizeDelta.y * 0.5f,
-                    sizeDelta.x * 0.5f,
-                    sizeDelta.y * 0.5f);
-
-                if (view.Record.ClassId == classId)
-                {
-                    // If the new box overlaps with an existing one of the same class, reuse it
-                    if (SentisInferenceRunManager.CalculateIoU(newBox, currentBox) > 0f)
-                    {
-                        if (reusedView == null)
-                        {
-                            reusedView = view;
-                        }
-                        else
-                        {
-                            // Same overlapping class - remove the existing box
-                            ReturnToPool(view);
-                            m_boxViews.RemoveAt(i);
-                        }
-                    }
-                }
-                // If the new box's IoU with another class is significant, remove the existing box
-                else if (SentisInferenceRunManager.CalculateIoU(newBox, currentBox) > 0.1f)
-                {
-                    // Different overlapping class - remove the existing box
-                    ReturnToPool(view);
-                    m_boxViews.RemoveAt(i);
-                }
+                var record = m_boxViews[i].Record;
+                existing[i] = new LabelAssociation.Existing(record.ClassId, record.WorldPosition, record.LastSeenTime);
             }
 
-            if (reusedView != null)
+            var decision = LabelAssociation.Decide(
+                existing, classId, worldSpaceCenter, Time.time, AssociationDistanceMeters, GracePeriodSeconds);
+
+            // Decision.AssociatedIndex/RemoveIndex are mutually exclusive (see
+            // LabelAssociation.Decide), so removing here never invalidates an
+            // AssociatedIndex we're about to use below.
+            if (decision.RemoveIndex >= 0)
             {
-                return reusedView;
+                // Object Tagger slice 5 Task 2 Step 3 (alpha-scope.md re-placement
+                // rule): this same-class label is now farther than the association
+                // threshold but still inside its grace period. Left alone it would
+                // linger up to GracePeriodSeconds after the object it tracked has
+                // already moved elsewhere and spawned a new label there — briefly
+                // showing two labels for one object. Removing it immediately here
+                // is what the spec asks for instead of waiting on Update()'s expiry.
+                var staleView = m_boxViews[decision.RemoveIndex];
+                ReturnToPool(staleView);
+                m_boxViews.RemoveAt(decision.RemoveIndex);
             }
+
+            if (decision.AssociatedIndex >= 0)
+            {
+                return m_boxViews[decision.AssociatedIndex];
+            }
+
+            // Object Tagger slice 5 Task 2: different-class overlap in space is
+            // deliberately NOT handled here — the locked decision is that both
+            // labels stay visible and the farther one gets a visual offset, which
+            // is Task 5's job. This method never inspects, evicts, or otherwise
+            // touches any other-class BoxView.
 
             // Create a new box, backed by a fresh LabelRecord with its own session id.
             var newView = GetViewFromPoolOrCreate();

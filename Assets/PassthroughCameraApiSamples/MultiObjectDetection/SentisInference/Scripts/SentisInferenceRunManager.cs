@@ -344,12 +344,5 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 outDetections);
         }
 
-        /// Forwarder kept so the two callers in SentisInferenceUiManager keep compiling
-        /// untouched. Those are the cross-frame ASSOCIATION test that spec line 55
-        /// replaces in slice 5, distinct from the intra-frame suppression use — slice 3
-        /// must not alter them.
-        internal static float CalculateIoU(Vector4 boxA, Vector4 boxB) =>
-            DetectionDecoder.CalculateIoU(boxA, boxB);
-
     }
 }
