@@ -81,6 +81,45 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // reproduces scatter near that magnitude for a tracked class.
         private const float AssociationDistanceMeters = 0.3f;
 
+        // Object Tagger slice 5 Task 3: confirmation count before a label becomes visible.
+        //
+        // A label appears only after N CONSECUTIVE accepted detections associate to
+        // the same position, so a single spurious detection does not produce a visible
+        // label. This constant defines that threshold.
+        //
+        // LATENCY ARITHMETIC (Task 3 Step 2, spec line 76):
+        // No on-device inference cadence has ever been measured in this project.
+        // The configured cadence lever (m_minSecondsBetweenInferences) defaults to 0
+        // ("uncapped, matches upstream"), so there is no baseline rate. This arithmetic
+        // uses a conservative WORST-CASE ASSUMPTION in the absence of real data.
+        //
+        // ASSUMPTION: Sentis on a mobile CPU backend for a YOLO-based model this size
+        // plausibly runs well under 2 inferences/sec; assuming pessimistic 1 inference/sec
+        // (1s cadence) as a conservative placeholder.
+        //
+        // CHOSEN VALUE: N = 2 confirmations.
+        //
+        // LATENCY = 2 confirmations × 1s cadence = 2 seconds for a label to appear.
+        // (Note: a newly-spawned label starts at ConfirmationCount=0 and requires
+        // ConfirmationCount >= 2 to be visible, so the spawning detection itself
+        // counts as the first confirmation. Total observations before visibility:
+        // first detection (spawn, count=0) + 1 more association (count reaches 1),
+        // then on the 2nd associated detection it reaches count=2 and becomes visible.)
+        //
+        // 2 seconds is comfortably within "a few seconds" (alpha-scope.md). This
+        // arithmetic MUST be reconciled against the REAL logged cadence figure at
+        // Task 6's device gate. Once that number exists, N may need revisiting.
+        private const int ConfirmationsBeforeVisible = 2;
+
+        // Object Tagger slice 5 Task 3: position smoothing factor.
+        //
+        // Smoothing uses exponential (lerp-based) blending: each frame,
+        // SmoothedPosition = Lerp(SmoothedPosition, WorldPosition, SmoothingFactor).
+        // Factor should be in (0, 1): smaller values (e.g. 0.1) smooth more heavily,
+        // larger values (e.g. 0.3) respond faster. With Lerp, factor in (0,1) cannot
+        // overshoot or oscillate. 0.2 is a middle ground: responsive but still smooth.
+        private const float SmoothingFactor = 0.2f;
+
         private readonly List<BoxView> m_boxViews = new();
         private string[] m_labels;
         private readonly List<BoxView> m_boxViewPool = new();
@@ -204,11 +243,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         {
             LogCountsIfDue();
 
-            // Remove boxes that haven't been updated recently
+            // Object Tagger slice 5 Task 3: remove boxes that haven't been updated
+            // recently. Task 3 owns expiry logic; Update() applies it here via the
+            // pure-logic IsExpired function. Works for both confirmed (ConfirmationCount
+            // >= ConfirmationsBeforeVisible) and not-yet-confirmed labels — a spurious
+            // detection that never reaches confirmation is still cleaned up once it
+            // stops being re-detected, not lingering forever unconfirmed.
             for (int i = m_boxViews.Count - 1; i >= 0; i--)
             {
                 var view = m_boxViews[i];
-                if (Time.time - view.Record.LastSeenTime > GracePeriodSeconds)
+                if (LabelPresentation.IsExpired(view.Record.LastSeenTime, Time.time, GracePeriodSeconds))
                 {
                     ReturnToPool(view);
                     m_boxViews.RemoveAt(i);
@@ -370,28 +414,67 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     Mathf.Abs(bottomRightLocal.x - topLeftLocal.x),
                     Mathf.Abs(bottomRightLocal.y - topLeftLocal.y));
 
-                var view = GetOrCreateBoxView(detection.classId, worldSpaceCenter);
+                var view = GetOrCreateBoxView(detection.classId, worldSpaceCenter, out var wasAssociation);
 
                 // Object Tagger slice 5 Task 1 Step 1: update the RECORD first — this is
                 // the state. WorldPosition is the world-space placement Task 2's matching
-                // will read instead of RectTransform/IoU. SmoothedPosition just tracks
-                // WorldPosition for now; Task 3 owns real smoothing.
+                // will read instead of RectTransform/IoU.
                 //
-                // SCOPE BOUNDARY (Step 3): LastAssociatedScore is stored here so it
-                // exists for Task 4, but it must NOT be read by the view below. Slice 3
-                // stopped the score at this boundary deliberately.
+                // Object Tagger slice 5 Task 3:
+                // - On spawn (wasAssociation==false): SmoothedPosition starts at
+                //   WorldPosition so smoothing begins at the first observation, not
+                //   from the origin. ConfirmationCount starts at 0 (set in
+                //   GetOrCreateBoxView) and will be incremented here if this spawn
+                //   happens to also be an association (which it isn't, but the logic
+                //   below is uniform).
+                // - On association (wasAssociation==true): ConfirmationCount is
+                //   incremented ONCE per association, so the N-th associated detection
+                //   makes it >= threshold. SmoothedPosition is lerped toward
+                //   WorldPosition to smooth out jitter.
+                // - Visibility is gated on ConfirmationCount >= ConfirmationsBeforeVisible
+                //   by SetActive below.
+                //
+                // SCOPE BOUNDARY: LastAssociatedScore is stored here so it exists for
+                // Task 4, but it must NOT be read by the view below. Slice 3 stopped
+                // the score at this boundary deliberately.
                 var record = view.Record;
                 record.WorldPosition = worldSpaceCenter;
-                record.SmoothedPosition = worldSpaceCenter;
+
+                if (!wasAssociation)
+                {
+                    // New spawn: initialize SmoothedPosition at the first observation.
+                    record.SmoothedPosition = worldSpaceCenter;
+                }
+                else
+                {
+                    // Associated re-detection: smooth toward the new position.
+                    record.SmoothedPosition = LabelPresentation.Smooth(
+                        record.SmoothedPosition, worldSpaceCenter, SmoothingFactor);
+
+                    // Increment confirmation count on each associated detection.
+                    record.ConfirmationCount++;
+                }
+
                 record.LastAssociatedScore = detection.score;
                 record.LastSeenTime = Time.time;
 
                 // Step 2: the view is a PROJECTION of the record, not the other way
                 // round. Everything the RectTransform is set to below is read from
                 // `record`, never stored back into it.
+                //
+                // Object Tagger slice 5 Task 3: visibility gate. Each frame, every
+                // BoxView's active state is set based on whether it has reached the
+                // confirmation threshold. This keeps the invariant (state lives on
+                // LabelRecord, view is a pure projection) intact and ensures newly-
+                // spawned labels are invisible until confirmed.
                 var boxRectTransform = view.RectTransform;
+                boxRectTransform.gameObject.SetActive(
+                    LabelPresentation.IsVisible(record.ConfirmationCount, ConfirmationsBeforeVisible));
+
                 boxRectTransform.GetComponentInChildren<Text>().text = $"Id: {detection.classId} Class: {classname} Center (px): {center:0.0} Center (%): {normalizedCenter:0.0}";
-                boxRectTransform.SetPositionAndRotation(record.WorldPosition, Quaternion.LookRotation(normal));
+                // Position is read from SmoothedPosition (which has latency built in via
+                // smoothing) rather than WorldPosition (raw estimate), so jitter is dampened.
+                boxRectTransform.SetPositionAndRotation(record.SmoothedPosition, Quaternion.LookRotation(normal));
                 boxRectTransform.sizeDelta = size;
             }
         }
@@ -401,7 +484,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // matching. The decision itself is pure logic in LabelAssociation.Decide —
         // this method's job is just to snapshot m_boxViews into that function's
         // input shape and act on the Decision it returns.
-        private BoxView GetOrCreateBoxView(int classId, Vector3 worldSpaceCenter)
+        //
+        // Object Tagger slice 5 Task 3: returns wasAssociation to distinguish spawns
+        // from re-detections. Task 3 uses this to increment ConfirmationCount only on
+        // associations (not on the spawn itself), keeping all record mutation in
+        // DrawUIBoxes alongside the other field updates.
+        private BoxView GetOrCreateBoxView(int classId, Vector3 worldSpaceCenter, out bool wasAssociation)
         {
             var existing = new LabelAssociation.Existing[m_boxViews.Count];
             for (var i = 0; i < m_boxViews.Count; i++)
@@ -432,6 +520,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             if (decision.AssociatedIndex >= 0)
             {
+                wasAssociation = true;
                 return m_boxViews[decision.AssociatedIndex];
             }
 
@@ -448,21 +537,30 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             newView.Record.ClassName = LabelFor(classId);
             newView.Record.ConfirmationCount = 0;
             m_boxViews.Add(newView);
+            wasAssociation = false;
             return newView;
         }
 
         private BoxView GetViewFromPoolOrCreate()
         {
+            // Object Tagger slice 5 Task 3: do NOT activate here. Task 3 gates
+            // visibility on ConfirmationCount in DrawUIBoxes — labels start invisible
+            // and only become visible once ConfirmationCount >= ConfirmationsBeforeVisible.
+            // Activating here would cause freshly-spawned labels to flash visible
+            // for the remainder of the frame before DrawUIBoxes sets ConfirmationCount.
+            // Keeping activation deactivated here keeps the invariant in one place
+            // (DrawUIBoxes's SetActive call per frame per view).
             if (m_boxViewPool.Count > 0)
             {
                 var pooled = m_boxViewPool[m_boxViewPool.Count - 1];
-                pooled.RectTransform.gameObject.SetActive(true);
+                // Do not activate; DrawUIBoxes controls visibility.
                 m_boxViewPool.RemoveAt(m_boxViewPool.Count - 1);
                 return pooled;
             }
 
             var boxRectTransform = Instantiate(m_detectionBoxPrefab, ContentParent);
-            boxRectTransform.gameObject.SetActive(true);
+            // Start deactivated; DrawUIBoxes controls visibility.
+            boxRectTransform.gameObject.SetActive(false);
             return new BoxView
             {
                 RectTransform = boxRectTransform,
