@@ -1,5 +1,6 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+using System;
 using System.Collections.Generic;
 using Meta.XR;
 using Meta.XR.Samples;
@@ -20,17 +21,46 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [Space(10)]
         public UnityEvent<int> OnObjectsDetected;
 
-        internal readonly List<BoundingBoxData> m_boxDrawn = new();
-        private string[] m_labels;
-        private readonly List<BoundingBoxData> m_boxPool = new();
+        // Object Tagger slice 5 Task 1: LabelRecord itself lives in its own file
+        // (LabelRecord.cs) as a top-level PUBLIC type, not nested here — that is what
+        // lets edit-mode tests reach it without InternalsVisibleTo, matching how
+        // DepthResolveResult/DetectionDecoder/DetectionProjection are already set up in
+        // this project. See that file for the record's field-by-field rationale.
 
-        internal class BoundingBoxData
+        // Object Tagger slice 5 Task 1: pairs a LabelRecord (state) with the
+        // RectTransform that currently renders it. The RectTransform is a VIEW driven
+        // FROM the record every frame in DrawUIBoxes — the record is never derived
+        // from it. Task 4 retires this view; until then it is the only consumer of
+        // LabelRecord's WorldPosition.
+        //
+        // Deliberately a private pairing wrapper rather than a public List<LabelRecord>
+        // plus a parallel List<RectTransform>: two lists kept in sync by index drift
+        // apart the moment one is reordered or removed from mid-list (exactly what
+        // GetOrCreateBoxView's removal-during-iteration does below), and LabelRecord
+        // itself must not hold a RectTransform. The pairing wrapper is what makes both
+        // constraints satisfiable at once. GetOrCreateBoxView still matches on
+        // RectTransform.InverseTransformPoint/sizeDelta (box *extent* still lives only
+        // in the view) — correct for Task 1 since Task 2 replaces this whole matching
+        // rule with class+world-distance matching over LabelRecord.WorldPosition.
+        private class BoxView
         {
-            public string ClassName;
-            public int ClassId;
-            public RectTransform BoxRectTransform;
-            public float lastUpdateTime;
+            public LabelRecord Record;
+            public RectTransform RectTransform;
         }
+
+        // Object Tagger slice 5 Task 1: the grace period ceiling.
+        //
+        // The project's behavioural spec caps how long an unseen label may persist at
+        // 3 seconds — a hard acceptance-criterion ceiling, not a preference. Task 2's
+        // re-placement rule and Task 3's formal expiry both need this same number;
+        // defining it once here (instead of two independent copies) is what keeps them
+        // from drifting apart. Private is enough: only sibling code in this file reads
+        // it, and later tasks land in this same file.
+        private const float GracePeriodSeconds = 3f;
+
+        private readonly List<BoxView> m_boxViews = new();
+        private string[] m_labels;
+        private readonly List<BoxView> m_boxViewPool = new();
 
         private void Awake() => m_detectionBoxPrefab.gameObject.SetActive(false);
 
@@ -144,7 +174,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             Debug.Log($"[ObjectTagger] counts: detections={m_detectionsSeen} " +
                       $"raycastAttempts={m_raycastAttempts} raycastMisses={m_raycastMisses} " +
                       $"missRate={missRate}% subsystemUnavailable={m_depthSubsystemUnavailable} " +
-                      $"raysPerDetection={raysPerDetection} boxesDrawn={m_boxDrawn.Count}");
+                      $"raysPerDetection={raysPerDetection} boxesDrawn={m_boxViews.Count}");
         }
 
         private void Update()
@@ -152,14 +182,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             LogCountsIfDue();
 
             // Remove boxes that haven't been updated recently
-            for (int i = m_boxDrawn.Count - 1; i >= 0; i--)
+            for (int i = m_boxViews.Count - 1; i >= 0; i--)
             {
-                var box = m_boxDrawn[i];
-                const float timeToPersistBoxes = 3f;
-                if (Time.time - box.lastUpdateTime > timeToPersistBoxes)
+                var view = m_boxViews[i];
+                if (Time.time - view.Record.LastSeenTime > GracePeriodSeconds)
                 {
-                    ReturnToPool(box);
-                    m_boxDrawn.RemoveAt(i);
+                    ReturnToPool(view);
+                    m_boxViews.RemoveAt(i);
                 }
             }
         }
@@ -204,11 +233,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger slice 3 Task 2: signature widened to carry the score.
         //
-        // SCOPE BOUNDARY — the score stops here. BoundingBoxData deliberately gains no
-        // score field in slice 3. Spec line 73 assigns per-label score refresh and
-        // rendering "<class> — <confidence>%" to SLICE 5, which also moves per-label
-        // state out of RectTransforms. Carrying it further now would eat that work and
-        // couple this slice to state slice 5 is about to relocate.
+        // SCOPE BOUNDARY — the score stops at the RENDERED VIEW, not at this method.
+        // Slice 5 Task 1 gives LabelRecord a LastAssociatedScore field (spec line 73
+        // assigns per-label score refresh and rendering "<class> — <confidence>%" to
+        // slice 5), but per Task 1 Step 3 the RectTransform view below must not read or
+        // display it — that is Task 4's job. Rendering it early would make this a
+        // rendering change instead of the pure state change Task 1 is meant to be.
         public void DrawUIBoxes(List<(int classId, Vector4 boundingBox, float score)> detections, Vector2 inputSize, Pose cameraPose)
         {
             Vector2 currentResolution = m_cameraAccess.CurrentResolution;
@@ -317,22 +347,43 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     Mathf.Abs(bottomRightLocal.x - topLeftLocal.x),
                     Mathf.Abs(bottomRightLocal.y - topLeftLocal.y));
 
-                var boxData = GetOrCreateBoundingBoxData(detection.classId, worldSpaceCenter, size);
-                var boxRectTransform = boxData.BoxRectTransform;
+                var view = GetOrCreateBoxView(detection.classId, worldSpaceCenter, size);
+
+                // Object Tagger slice 5 Task 1 Step 1: update the RECORD first — this is
+                // the state. WorldPosition is the world-space placement Task 2's matching
+                // will read instead of RectTransform/IoU. SmoothedPosition just tracks
+                // WorldPosition for now; Task 3 owns real smoothing.
+                //
+                // SCOPE BOUNDARY (Step 3): LastAssociatedScore is stored here so it
+                // exists for Task 4, but it must NOT be read by the view below. Slice 3
+                // stopped the score at this boundary deliberately.
+                var record = view.Record;
+                record.WorldPosition = worldSpaceCenter;
+                record.SmoothedPosition = worldSpaceCenter;
+                record.LastAssociatedScore = detection.score;
+                record.LastSeenTime = Time.time;
+
+                // Step 2: the view is a PROJECTION of the record, not the other way
+                // round. Everything the RectTransform is set to below is read from
+                // `record`, never stored back into it.
+                var boxRectTransform = view.RectTransform;
                 boxRectTransform.GetComponentInChildren<Text>().text = $"Id: {detection.classId} Class: {classname} Center (px): {center:0.0} Center (%): {normalizedCenter:0.0}";
-                boxRectTransform.SetPositionAndRotation(worldSpaceCenter, Quaternion.LookRotation(normal));
+                boxRectTransform.SetPositionAndRotation(record.WorldPosition, Quaternion.LookRotation(normal));
                 boxRectTransform.sizeDelta = size;
-                boxData.lastUpdateTime = Time.time;
             }
         }
 
-        private BoundingBoxData GetOrCreateBoundingBoxData(int classId, Vector3 worldSpaceCenter, Vector2 worldSpaceSize)
+        // Object Tagger slice 5 Task 1: still the IoU/RectTransform-based matching Task 2
+        // replaces with class+world-distance matching over LabelRecord.WorldPosition.
+        // Left untouched here on purpose — Task 1 is a state-shape change only, not a
+        // matching-rule change.
+        private BoxView GetOrCreateBoxView(int classId, Vector3 worldSpaceCenter, Vector2 worldSpaceSize)
         {
-            BoundingBoxData reusedBox = null;
-            for (int i = m_boxDrawn.Count - 1; i >= 0; i--)
+            BoxView reusedView = null;
+            for (int i = m_boxViews.Count - 1; i >= 0; i--)
             {
-                var box = m_boxDrawn[i];
-                var localPos = box.BoxRectTransform.InverseTransformPoint(worldSpaceCenter);
+                var view = m_boxViews[i];
+                var localPos = view.RectTransform.InverseTransformPoint(worldSpaceCenter);
                 var newBox = new Vector4(
                     localPos.x - worldSpaceSize.x * 0.5f,
                     localPos.y - worldSpaceSize.y * 0.5f,
@@ -340,27 +391,27 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     localPos.y + worldSpaceSize.y * 0.5f
                 );
 
-                var sizeDelta = box.BoxRectTransform.sizeDelta;
+                var sizeDelta = view.RectTransform.sizeDelta;
                 var currentBox = new Vector4(
                     -sizeDelta.x * 0.5f,
                     -sizeDelta.y * 0.5f,
                     sizeDelta.x * 0.5f,
                     sizeDelta.y * 0.5f);
 
-                if (box.ClassId == classId)
+                if (view.Record.ClassId == classId)
                 {
                     // If the new box overlaps with an existing one of the same class, reuse it
                     if (SentisInferenceRunManager.CalculateIoU(newBox, currentBox) > 0f)
                     {
-                        if (reusedBox == null)
+                        if (reusedView == null)
                         {
-                            reusedBox = box;
+                            reusedView = view;
                         }
                         else
                         {
                             // Same overlapping class - remove the existing box
-                            ReturnToPool(box);
-                            m_boxDrawn.RemoveAt(i);
+                            ReturnToPool(view);
+                            m_boxViews.RemoveAt(i);
                         }
                     }
                 }
@@ -368,57 +419,60 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 else if (SentisInferenceRunManager.CalculateIoU(newBox, currentBox) > 0.1f)
                 {
                     // Different overlapping class - remove the existing box
-                    ReturnToPool(box);
-                    m_boxDrawn.RemoveAt(i);
+                    ReturnToPool(view);
+                    m_boxViews.RemoveAt(i);
                 }
             }
 
-            if (reusedBox != null)
+            if (reusedView != null)
             {
-                return reusedBox;
+                return reusedView;
             }
 
-            // Create a new box
-            var newData = GetBoxFromPoolOrCreate();
-            newData.ClassId = classId;
-            newData.ClassName = LabelFor(classId);
-            m_boxDrawn.Add(newData);
-            return newData;
+            // Create a new box, backed by a fresh LabelRecord with its own session id.
+            var newView = GetViewFromPoolOrCreate();
+            newView.Record.SessionId = Guid.NewGuid();
+            newView.Record.ClassId = classId;
+            newView.Record.ClassName = LabelFor(classId);
+            newView.Record.ConfirmationCount = 0;
+            m_boxViews.Add(newView);
+            return newView;
         }
 
-        private BoundingBoxData GetBoxFromPoolOrCreate()
+        private BoxView GetViewFromPoolOrCreate()
         {
-            if (m_boxPool.Count > 0)
+            if (m_boxViewPool.Count > 0)
             {
-                var pooled = m_boxPool[m_boxPool.Count - 1];
-                pooled.BoxRectTransform.gameObject.SetActive(true);
-                m_boxPool.RemoveAt(m_boxPool.Count - 1);
+                var pooled = m_boxViewPool[m_boxViewPool.Count - 1];
+                pooled.RectTransform.gameObject.SetActive(true);
+                m_boxViewPool.RemoveAt(m_boxViewPool.Count - 1);
                 return pooled;
             }
 
             var boxRectTransform = Instantiate(m_detectionBoxPrefab, ContentParent);
             boxRectTransform.gameObject.SetActive(true);
-            return new BoundingBoxData
+            return new BoxView
             {
-                BoxRectTransform = boxRectTransform
+                RectTransform = boxRectTransform,
+                Record = new LabelRecord()
             };
         }
 
         internal Transform ContentParent => m_detectionBoxPrefab.parent;
 
-        private void ReturnToPool(BoundingBoxData box)
+        private void ReturnToPool(BoxView view)
         {
-            box.BoxRectTransform.gameObject.SetActive(false);
-            m_boxPool.Add(box);
+            view.RectTransform.gameObject.SetActive(false);
+            m_boxViewPool.Add(view);
         }
 
         internal void ClearAnnotations()
         {
-            foreach (var box in m_boxDrawn)
+            foreach (var view in m_boxViews)
             {
-                ReturnToPool(box);
+                ReturnToPool(view);
             }
-            m_boxDrawn.Clear();
+            m_boxViews.Clear();
         }
     }
 }

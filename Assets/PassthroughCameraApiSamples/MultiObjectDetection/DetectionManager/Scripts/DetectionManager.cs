@@ -5,7 +5,6 @@ using System.Collections.Generic;
 using Meta.XR;
 using Meta.XR.Samples;
 using UnityEngine;
-using UnityEngine.Events;
 
 namespace PassthroughCameraSamples.MultiObjectDetection
 {
@@ -14,15 +13,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
     {
         [SerializeField] private PassthroughCameraAccess m_cameraAccess;
 
-        [Header("Placement configuration")]
-        [SerializeField] private DetectionSpawnMarkerAnim m_spawnMarker;
-
         [SerializeField] private SentisInferenceUiManager m_uiInference;
-        [Space(10)]
-        public UnityEvent<int> OnObjectsIdentified;
 
-        private readonly List<DetectionSpawnMarkerAnim> m_spawnedEntities = new();
-        private bool m_isStarted;
         internal OVRSpatialAnchor m_spatialAnchor;
         private bool m_isHeadsetTracking;
 
@@ -43,25 +35,15 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private void OnTrackingLost() => m_isHeadsetTracking = false;
         private void OnTrackingAcquired() => m_isHeadsetTracking = true;
 
+        // Object Tagger slice 5 Task 1: the "spawn 3D marker on A button" branch that
+        // used to live here is deleted along with SpawnCurrentDetectedObjects() below
+        // — it read BoundingBoxData.BoxRectTransform, which no longer exists. That
+        // also removed the only reader of the "has the camera started" gate, so it
+        // goes too. The B-button "clean markers" hook is kept: CleanMarkers() still
+        // exists (called from the spatial-anchor lifecycle) even though it no longer
+        // has markers to destroy.
         private void Update()
         {
-            if (!m_isStarted)
-            {
-                // Manage the Initial Ui Menu
-                if (m_cameraAccess.IsPlaying)
-                {
-                    m_isStarted = true;
-                }
-            }
-            else
-            {
-                // Press A button to spawn 3d markers
-                if (InputManager.IsButtonADownOrPinchStarted())
-                {
-                    SpawnCurrentDetectedObjects();
-                }
-            }
-
             // Press B button to clean all markers
             if (InputManager.IsButtonBDownOrMiddleFingerPinchStarted())
             {
@@ -188,79 +170,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
         }
 
+        // Object Tagger slice 5 Task 1: the marker-destroy loop, m_spawnedEntities
+        // clear, and OnObjectsIdentified invocation are deleted along with the rest of
+        // the now-confirmed-dead "spawn 3D marker" feature (SpawnCurrentDetectedObjects
+        // and HasExistingMarkerInBoundingBox, both removed). CleanMarkers() itself is
+        // kept: EraseSpatialAnchor() (spatial-anchor lifecycle, out of scope for this
+        // task) still calls it.
         private void CleanMarkers()
         {
             LogSpatialAnchor("CleanMarkers");
-            foreach (var e in m_spawnedEntities)
-            {
-                Destroy(e.gameObject);
-            }
-            m_spawnedEntities.Clear();
-            OnObjectsIdentified?.Invoke(-1);
         }
 
         private static void LogSpatialAnchor(string message, LogType logType = LogType.Log)
         {
             Debug.unityLogger.Log(logType, $"{nameof(OVRSpatialAnchor)}: {message}");
-        }
-
-        /// <summary>
-        /// Spwan 3d markers for the detected objects
-        /// </summary>
-        private void SpawnCurrentDetectedObjects()
-        {
-            var newCount = 0;
-            foreach (SentisInferenceUiManager.BoundingBoxData box in m_uiInference.m_boxDrawn)
-            {
-                if (!HasExistingMarkerInBoundingBox(box))
-                {
-                    // Slice 4 Task 3 Step 1: log the RESOLVED DISTANCE with each marker.
-                    //
-                    // The plan requires measuring the current placement offset before
-                    // changing placement, and slice 2 could only produce the tester's
-                    // qualitative "some cm from the object". Logging resolved distance
-                    // makes that measurable: put an object at a tape-measured distance,
-                    // tag it, and compare. The difference IS the depth error, which is
-                    // what the median-sampling change has to improve on.
-                    var markerPos = box.BoxRectTransform.position;
-                    var camPos = m_cameraAccess.GetCameraPose().position;
-                    LogSpatialAnchor($"spawn marker {box.ClassName} " +
-                                     $"resolvedDistance={Vector3.Distance(camPos, markerPos):F3}m " +
-                                     $"worldPos=({markerPos.x:F3},{markerPos.y:F3},{markerPos.z:F3})");
-                    var marker = Instantiate(m_spawnMarker, box.BoxRectTransform.position, box.BoxRectTransform.rotation, m_uiInference.ContentParent);
-                    marker.GetComponent<DetectionSpawnMarkerAnim>().SetYoloClassName(box.ClassName);
-
-                    m_spawnedEntities.Add(marker);
-                    newCount++;
-                }
-            }
-            OnObjectsIdentified?.Invoke(newCount);
-
-            bool HasExistingMarkerInBoundingBox(SentisInferenceUiManager.BoundingBoxData box)
-            {
-                foreach (var marker in m_spawnedEntities)
-                {
-                    if (marker.GetYoloClassName() == box.ClassName)
-                    {
-                        var markerWorldPos = marker.transform.position;
-                        Vector2 localPos = box.BoxRectTransform.InverseTransformPoint(markerWorldPos);
-                        var sizeDelta = box.BoxRectTransform.sizeDelta;
-                        var currentBox = new Rect(
-                            -sizeDelta.x * 0.5f,
-                            -sizeDelta.y * 0.5f,
-                            sizeDelta.x,
-                            sizeDelta.y
-                        );
-
-                        if (currentBox.Contains(localPos))
-                        {
-                            return true;
-                        }
-                    }
-                }
-
-                return false;
-            }
         }
     }
 }
