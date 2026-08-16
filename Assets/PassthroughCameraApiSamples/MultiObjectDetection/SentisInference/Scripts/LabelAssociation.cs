@@ -81,14 +81,27 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         /// Re-placement rule (alpha-scope.md, via Task 2 Step 3): if nothing
         /// associates, a same-class label that is now farther than the threshold
         /// but still inside its grace period reads as "the same physical object
-        /// moved" ONLY when it is the UNIQUE such candidate. With two or more
-        /// same-class candidates still in grace, there is no way to tell which one
-        /// (if any) the new observation replaces without risking misattribution of
-        /// a still-present, unrelated object's label — so none are reaped, and the
+        /// moved" ONLY when it is the UNIQUE such candidate AND it was last seen
+        /// in a STRICTLY EARLIER frame (age > 0). With two or more same-class
+        /// candidates still in grace, there is no way to tell which one (if any)
+        /// the new observation replaces without risking misattribution of a
+        /// still-present, unrelated object's label — so none are reaped, and the
         /// caller's existing grace-period expiry is left to clean them up later.
         /// Wrongly reaping an unrelated object's label is the worse bug; a stale
         /// label lingering up to the grace period is already spec-compliant
         /// behaviour.
+        ///
+        /// The age > 0 guard matters because the caller (SentisInferenceUiManager)
+        /// processes every detection in a frame against the same Time.time and
+        /// stamps LastSeenTime with it as each one is placed. Two SEPARATE,
+        /// concurrently-visible same-class objects detected in the SAME frame
+        /// would otherwise look identical to "one object that moved": the first
+        /// one placed has age == 0 relative to the second, is the unique in-grace
+        /// candidate, and would get reaped — collapsing every simultaneously
+        /// visible instance of a class down to one and needlessly resetting
+        /// SessionId/ConfirmationCount on survivors frame after frame. A record
+        /// updated THIS frame is never "the previous label of an object that
+        /// moved"; it is a currently-visible different instance.
         public static Decision Decide(
             IReadOnlyList<Existing> existing,
             int newClassId,
@@ -136,7 +149,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // >= distanceThresholdMeters away — otherwise it would have won the
                 // association loop above.
                 var age = currentTime - candidate.LastSeenTime;
-                if (age > gracePeriodSeconds)
+
+                // age <= 0 means this record was placed THIS frame (same
+                // Time.time) — a different, concurrently-visible instance of the
+                // class, not a stale previous label. See the age > 0 note above
+                // Decide's signature.
+                if (age <= 0f || age > gracePeriodSeconds)
                 {
                     continue;
                 }

@@ -64,12 +64,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // plan calls for a threshold "in the tens of centimetres". 0.3m is chosen
         // as the balance point: too large (e.g. 0.5m+) risks merging two
         // neighbouring same-class objects into one label — a pair of chairs at a
-        // table is commonly closer together than that. Too small (e.g. <0.15m)
-        // spawns duplicate labels for the SAME object as the depth/position
-        // estimate jitters frame to frame, which slice 4's validation records
-        // show is on the order of several centimetres, not sub-centimetre. 0.3m
-        // sits comfortably above that jitter floor while staying well under
-        // typical same-class object spacing.
+        // table is commonly closer together than that. Too small spawns
+        // duplicate labels for the SAME object as the depth/position estimate
+        // jitters frame to frame — slice 4's validation record
+        // (docs/validation/2026-08-15-slice-4-spatial-placement.md) documents
+        // per-tag scatter from under 1cm up to low-double-digit centimetres on
+        // outliers, with the exact figure still contested (see that record's
+        // permanently-unresolved mouse-precision conflict) rather than a single
+        // settled number. 0.3m sits above even the higher end of that
+        // documented scatter while staying well under typical same-class object
+        // spacing.
         private const float AssociationDistanceMeters = 0.3f;
 
         private readonly List<BoxView> m_boxViews = new();

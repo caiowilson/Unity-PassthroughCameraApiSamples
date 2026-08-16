@@ -65,6 +65,28 @@ namespace ObjectTagger.Tests.EditMode
         }
 
         [Test]
+        public void SameFrameSameClassFarCandidateIsNotReaped()
+        {
+            // Two SEPARATE same-class objects visible in the SAME frame, e.g. two
+            // chairs 2m apart. DrawUIBoxes stamps LastSeenTime with the same
+            // Time.time for every detection processed this frame, so the first
+            // one placed (R1) has age == 0 relative to the second detection (B)
+            // being decided right now. R1 must NOT read as "the previous label of
+            // an object that moved" — it is a currently-visible different
+            // instance. Regression test: without the age > 0 guard, R1 would be
+            // the unique in-grace same-class candidate and get wrongly reaped,
+            // collapsing every simultaneously-visible instance of a class to one
+            // per frame.
+            var existing = One(classId: 5, pos: new Vector3(0f, 0f, 0f), lastSeenTime: 10f);
+            var newPos = new Vector3(2f, 0f, 0f);
+
+            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 10f, Threshold, GracePeriod);
+
+            Assert.AreEqual(-1, decision.AssociatedIndex, "far same-class observation must still spawn a new label");
+            Assert.AreEqual(-1, decision.RemoveIndex, "a same-frame (age == 0) candidate is a different instance, not a stale previous label");
+        }
+
+        [Test]
         public void AmbiguousMultipleStaleSameClassCandidatesReapsNeither()
         {
             // Two same-class labels, both far from the new observation and both
