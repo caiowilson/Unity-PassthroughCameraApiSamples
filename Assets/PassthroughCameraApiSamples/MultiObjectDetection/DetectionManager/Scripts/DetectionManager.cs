@@ -15,6 +15,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         [SerializeField] private SentisInferenceUiManager m_uiInference;
 
+        private bool m_isStarted;
         internal OVRSpatialAnchor m_spatialAnchor;
         private bool m_isHeadsetTracking;
 
@@ -35,15 +36,35 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private void OnTrackingLost() => m_isHeadsetTracking = false;
         private void OnTrackingAcquired() => m_isHeadsetTracking = true;
 
-        // Object Tagger slice 5 Task 1: the "spawn 3D marker on A button" branch that
-        // used to live here is deleted along with SpawnCurrentDetectedObjects() below
-        // — it read BoundingBoxData.BoxRectTransform, which no longer exists. That
-        // also removed the only reader of the "has the camera started" gate, so it
-        // goes too. The B-button "clean markers" hook is kept: CleanMarkers() still
-        // exists (called from the spatial-anchor lifecycle) even though it no longer
-        // has markers to destroy.
+        // Object Tagger slice 5 Task 1: the ONLY thing removed from this method is the
+        // SpawnCurrentDetectedObjects() call inside the A-button branch — that method
+        // is deleted below because it read BoundingBoxData.BoxRectTransform, which no
+        // longer exists. m_isStarted, the if/else structure, and the A-button check
+        // are left exactly as they were; the A-button branch is now a no-op (button
+        // press detected, nothing happens) rather than removed, matching the brief's
+        // "delete exactly these six items" scope — nothing here was on that list.
         private void Update()
         {
+            if (!m_isStarted)
+            {
+                // Manage the Initial Ui Menu
+                if (m_cameraAccess.IsPlaying)
+                {
+                    m_isStarted = true;
+                }
+            }
+            else
+            {
+                // Press A button to spawn 3d markers
+                if (InputManager.IsButtonADownOrPinchStarted())
+                {
+                    // Object Tagger slice 5 Task 1: SpawnCurrentDetectedObjects() is
+                    // deleted (below) along with the rest of the confirmed-dead marker
+                    // feature. This branch is left as a no-op rather than removed —
+                    // see the method comment above.
+                }
+            }
+
             // Press B button to clean all markers
             if (InputManager.IsButtonBDownOrMiddleFingerPinchStarted())
             {
