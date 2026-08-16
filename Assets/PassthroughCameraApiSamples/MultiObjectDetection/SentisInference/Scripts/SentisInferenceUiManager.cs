@@ -67,13 +67,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // table is commonly closer together than that. Too small spawns
         // duplicate labels for the SAME object as the depth/position estimate
         // jitters frame to frame — slice 4's validation record
-        // (docs/validation/2026-08-15-slice-4-spatial-placement.md) documents
-        // per-tag scatter from under 1cm up to low-double-digit centimetres on
-        // outliers, with the exact figure still contested (see that record's
-        // permanently-unresolved mouse-precision conflict) rather than a single
-        // settled number. 0.3m sits above even the higher end of that
-        // documented scatter while staying well under typical same-class object
-        // spacing.
+        // (docs/validation/2026-08-15-slice-4-spatial-placement.md) settled on
+        // "AIMS CORRECTLY and JITTERS BADLY": mean accuracy ~2cm, individual
+        // placements scatter +/-13cm (its "decisive measurement", corrected
+        // result). 0.3m clears that with margin. One disputed, permanently-
+        // unresolved reading in the same record (the mouse-precision conflict,
+        // D-slice4-2) puts one class's scatter at 27.5cm on 6 samples — the
+        // record itself says the raw data to settle which figure is right no
+        // longer exists. 0.3m does NOT clear that disputed figure. Chosen
+        // anyway because it is disputed rather than confirmed, and because a
+        // threshold large enough to clear 27.5cm (e.g. 0.5m+) reopens the
+        // same-class-merging risk above. Revisit if a future device run
+        // reproduces scatter near that magnitude for a tracked class.
         private const float AssociationDistanceMeters = 0.3f;
 
         private readonly List<BoxView> m_boxViews = new();
