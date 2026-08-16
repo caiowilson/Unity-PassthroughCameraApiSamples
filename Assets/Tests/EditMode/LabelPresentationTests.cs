@@ -196,5 +196,75 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.IsTrue(isExpired, "long after grace period, label must be expired");
         }
+
+        // ===== Minimum-Apparent-Size Scale Tests (slice 5 Task 4 Step 3) =====
+        //
+        // The property under test is angular/apparent size, not the raw formula:
+        // beyond referenceDistance, scale must grow exactly proportionally with
+        // distance so that scale/distance (and therefore world-size/distance,
+        // i.e. apparent size) stays CONSTANT out to 4m and beyond. At or below
+        // referenceDistance, scale must not shrink below baseScale -- getting
+        // closer than the reference point is never the legibility risk this
+        // mechanism exists to fix.
+
+        private const float ReferenceDistance = 1f;
+        private const float BaseScale = 1f;
+
+        [Test]
+        public void ComputeCardScaleStaysAtBaseAtReferenceDistance()
+        {
+            var scale = LabelPresentation.ComputeCardScale(ReferenceDistance, BaseScale, ReferenceDistance);
+
+            Assert.AreEqual(BaseScale, scale, 1e-5f, "at exactly referenceDistance, scale must equal baseScale");
+        }
+
+        [Test]
+        public void ComputeCardScaleClampsToBaseBelowReferenceDistance()
+        {
+            // Closer than referenceDistance: must not shrink below baseScale.
+            var scale = LabelPresentation.ComputeCardScale(0.3f, BaseScale, ReferenceDistance);
+
+            Assert.AreEqual(BaseScale, scale, 1e-5f, "below referenceDistance, scale must be clamped to baseScale, not shrink further");
+        }
+
+        [Test]
+        public void ComputeCardScaleGrowsProportionallyBeyondReferenceDistance()
+        {
+            // At 4m (the far end of the legibility acceptance range) with a 1m
+            // reference distance, scale must be exactly 4x baseScale.
+            var scale = LabelPresentation.ComputeCardScale(4f, BaseScale, ReferenceDistance);
+
+            Assert.AreEqual(4f * BaseScale, scale, 1e-5f, "beyond referenceDistance, scale must grow linearly with distance");
+        }
+
+        [Test]
+        public void ComputeCardScaleHoldsApparentSizeConstantBeyondReferenceDistance()
+        {
+            // The actual requirement: apparent (angular) size is world-size/distance,
+            // i.e. proportional to scale/distance. For any two distances beyond
+            // referenceDistance, scale/distance must be the SAME constant
+            // (baseScale/referenceDistance) -- this is what "legible at 1m AND 4m"
+            // cashes out to, not merely "scale increases".
+            var scaleAt1_5m = LabelPresentation.ComputeCardScale(1.5f, BaseScale, ReferenceDistance);
+            var scaleAt4m = LabelPresentation.ComputeCardScale(4f, BaseScale, ReferenceDistance);
+
+            var apparentSizeAt1_5m = scaleAt1_5m / 1.5f;
+            var apparentSizeAt4m = scaleAt4m / 4f;
+
+            Assert.AreEqual(apparentSizeAt1_5m, apparentSizeAt4m, 1e-5f,
+                "apparent size (scale/distance) must stay constant beyond referenceDistance");
+            Assert.AreEqual(BaseScale / ReferenceDistance, apparentSizeAt4m, 1e-5f,
+                "the constant apparent size beyond referenceDistance must equal baseScale/referenceDistance");
+        }
+
+        [Test]
+        public void ComputeCardScaleWithNonUnitBaseScale()
+        {
+            // Boundary sanity with a non-1 baseScale, to catch an implementation
+            // that hardcodes 1 instead of multiplying by baseScale.
+            var scale = LabelPresentation.ComputeCardScale(2f, 0.5f, ReferenceDistance);
+
+            Assert.AreEqual(1f, scale, 1e-5f, "baseScale must scale the whole result, not just the clamp floor");
+        }
     }
 }

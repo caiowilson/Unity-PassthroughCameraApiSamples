@@ -42,10 +42,24 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // RectTransform entirely (class+world-distance over LabelRecord.WorldPosition,
         // see LabelAssociation.cs) — the RectTransform here is now pure output, never
         // read for matching.
+        // Object Tagger slice 5 Task 4: Label is resolved ONCE, in
+        // GetViewFromPoolOrCreate, and cached here rather than looked up per-frame
+        // via GetComponentInChildren<Text>() inside DrawUIBoxes. That per-frame
+        // lookup would have been broken: DrawUIBoxes calls SetActive(false) on
+        // unconfirmed views (Task 3's visibility gate), the source prefab itself
+        // is already inactive by the time any clone is made (see Awake()), and
+        // the no-argument GetComponentInChildren<T>() overload defaults
+        // includeInactive to false — so a per-frame lookup would return null on
+        // every still-unconfirmed label and throw a NullReferenceException on
+        // `.text`. Resolving once with includeInactive:true at creation time
+        // (see GetViewFromPoolOrCreate) sidesteps that entirely, and is still a
+        // VIEW-side cache, not new state: Label is derived once from the
+        // prefab's fixed hierarchy, never written back to LabelRecord.
         private class BoxView
         {
             public LabelRecord Record;
             public RectTransform RectTransform;
+            public Text Label;
         }
 
         // Object Tagger slice 5 Task 1: the grace period ceiling.
@@ -119,6 +133,29 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // larger values (e.g. 0.3) respond faster. With Lerp, factor in (0,1) cannot
         // overshoot or oscillate. 0.2 is a middle ground: responsive but still smooth.
         private const float SmoothingFactor = 0.2f;
+
+        // Object Tagger slice 5 Task 4 Step 3 — minimum-apparent-size reference
+        // distance and base scale.
+        //
+        // Legibility at 1m AND 4m is an acceptance criterion (alpha-scope.md). A
+        // fixed world size alone fails it: apparent size shrinks with distance, so
+        // a card sized to read comfortably up close goes illegible at 4m. The card's
+        // prefab is authored in world-meter units (dot diameter, text cap height)
+        // calibrated to read comfortably at ReferenceDistanceMeters -- the NEAR end
+        // of the range, chosen deliberately: a card sized for the far end (4m)
+        // would look oversized at 1m, while one sized for the near end and then
+        // scaled UP as the camera backs away (LabelPresentation.ComputeCardScale)
+        // holds that same apparent size out to 4m and beyond. BaseCardScale is the
+        // multiplier at/below ReferenceDistanceMeters -- 1x, i.e. the prefab's
+        // authored size IS the near-distance size, nothing scales it down further.
+        //
+        // Both are a reasoned starting point, not a confirmed one: no on-device
+        // measurement has ever assessed legibility on the actual Quest 3 display at
+        // either distance. MUST be confirmed by human judgment at Task 6's device
+        // gate, exactly like Task 3's cadence assumption -- revisit both constants
+        // and the prefab's authored sizes together if that check fails.
+        private const float ReferenceDistanceMeters = 1f;
+        private const float BaseCardScale = 1f;
 
         private readonly List<BoxView> m_boxViews = new();
         private string[] m_labels;
@@ -308,8 +345,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // rendering change instead of the pure state change Task 1 is meant to be.
         public void DrawUIBoxes(List<(int classId, Vector4 boundingBox, float score)> detections, Vector2 inputSize, Pose cameraPose)
         {
-            Vector2 currentResolution = m_cameraAccess.CurrentResolution;
-
             if (detections.Count == 0)
             {
                 OnObjectsDetected?.Invoke(0);
@@ -331,7 +366,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // Rect rect = Rect.MinMaxRect(x1, y1, x2, y2); // todo
 
                 Vector2 normalizedCenter = rect.center / inputSize;
-                Vector2 center = currentResolution * (normalizedCenter - Vector2.one * 0.5f);
 
                 // Get the object class name
                 var classname = LabelFor(detection.classId);
@@ -398,21 +432,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 var worldSpaceCenter = m_cameraAccess.ViewportPointToRay(normRect.center, cameraPose).GetPoint(distance);
                 var normal = (worldSpaceCenter - cameraPose.position).normalized;
 
-                // Intersect corner rays with the plane perpendicular to the camera view
-                var plane = new Plane(normal, worldSpaceCenter);
-                var minRay = m_cameraAccess.ViewportPointToRay(normRect.min, cameraPose);
-                var maxRay = m_cameraAccess.ViewportPointToRay(normRect.max, cameraPose);
-                plane.Raycast(minRay, out float intersectionDistanceMin);
-                plane.Raycast(maxRay, out float intersectionDistanceMax);
-                var min = minRay.GetPoint(intersectionDistanceMin);
-                var max = maxRay.GetPoint(intersectionDistanceMax);
-
-                // Transform world-space positions to camera's local space to get 2D size
-                var topLeftLocal = Quaternion.Inverse(cameraPose.rotation) * (min - cameraPose.position);
-                var bottomRightLocal = Quaternion.Inverse(cameraPose.rotation) * (max - cameraPose.position);
-                var size = new Vector2(
-                    Mathf.Abs(bottomRightLocal.x - topLeftLocal.x),
-                    Mathf.Abs(bottomRightLocal.y - topLeftLocal.y));
+                // Object Tagger slice 5 Task 4 Step 2: the corner-ray reconstruction
+                // that used to live here (intersecting minRay/maxRay against a plane
+                // to derive a Vector2 size for the box's RectTransform) is retired.
+                // It existed solely to size a bounding box, and there is no bounding
+                // box any more (locked decision: a billboarded text card + anchor dot,
+                // no box, no outline). worldSpaceCenter/normal above are unaffected —
+                // they come from normRect.center, not from the corner rays.
 
                 var view = GetOrCreateBoxView(detection.classId, worldSpaceCenter, out var wasAssociation);
 
@@ -471,11 +497,43 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 boxRectTransform.gameObject.SetActive(
                     LabelPresentation.IsVisible(record.ConfirmationCount, ConfirmationsBeforeVisible));
 
-                boxRectTransform.GetComponentInChildren<Text>().text = $"Id: {detection.classId} Class: {classname} Center (px): {center:0.0} Center (%): {normalizedCenter:0.0}";
+                // Object Tagger slice 5 Task 4 Step 1: "<class> — <confidence>%",
+                // rounded, from the RECORD's LastAssociatedScore (last accepted
+                // detection's score, unsmoothed — smoothing applies to position
+                // only, per the locked decision). This is the first time confidence
+                // reaches the screen; slices 3-4 deliberately carried it without
+                // rendering it. Score is a 0-1 probability (m_scoreThreshold is
+                // [Range(0,1)], defaulted to 0.23/0.3 across this project's
+                // configs), so *100 rounded is a percentage, not double-scaling an
+                // already-scaled value. Reads record.ClassName (not the local
+                // `classname`) so the view stays a projection of the record, not of
+                // loop-local state. LabelFor() replaces spaces with underscores for
+                // internal/log use (ClassName, debug lines) — reversed here for
+                // display only, so a COCO class like "cell phone" doesn't render as
+                // "cell_phone" on the card.
+                var displayClassName = record.ClassName.Replace('_', ' ');
+                view.Label.text = $"{displayClassName} — {Mathf.RoundToInt(record.LastAssociatedScore * 100)}%";
+
                 // Position is read from SmoothedPosition (which has latency built in via
                 // smoothing) rather than WorldPosition (raw estimate), so jitter is dampened.
+                // This position is also the anchor dot's literal world position — the dot
+                // is a child of boxRectTransform at local anchoredPosition (0,0), so it
+                // tracks SmoothedPosition exactly regardless of the scale applied below.
+                //
+                // Rotation: Quaternion.LookRotation(normal) is the existing billboard/
+                // face-camera behaviour, carried forward unchanged from Task 1-3 — no new
+                // component needed (Object Tagger slice 5 Task 4 Step 3).
                 boxRectTransform.SetPositionAndRotation(record.SmoothedPosition, Quaternion.LookRotation(normal));
-                boxRectTransform.sizeDelta = size;
+
+                // Object Tagger slice 5 Task 4 Step 3: minimum-apparent-size scale.
+                // See ReferenceDistanceMeters/BaseCardScale and
+                // LabelPresentation.ComputeCardScale for the full reasoning. Distance
+                // is measured from the camera to the label's SMOOTHED position (what
+                // is actually rendered), not the raw WorldPosition, so the scale
+                // doesn't jitter independently of the position it's scaling.
+                var cardDistance = Vector3.Distance(cameraPose.position, record.SmoothedPosition);
+                var cardScale = LabelPresentation.ComputeCardScale(cardDistance, BaseCardScale, ReferenceDistanceMeters);
+                boxRectTransform.localScale = Vector3.one * cardScale;
             }
         }
 
@@ -559,11 +617,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
 
             var boxRectTransform = Instantiate(m_detectionBoxPrefab, ContentParent);
+            // Object Tagger slice 5 Task 4: resolve the Text component here, with
+            // includeInactive:true. The source prefab is already deactivated by
+            // Awake() by the time any view is created, so the clone is inactive
+            // from the moment it exists -- the no-argument
+            // GetComponentInChildren<Text>() overload would return null here, not
+            // just later. See the BoxView.Label comment for why this must be
+            // cached rather than looked up per-frame.
+            var label = boxRectTransform.GetComponentInChildren<Text>(true);
             // Start deactivated; DrawUIBoxes controls visibility.
             boxRectTransform.gameObject.SetActive(false);
             return new BoxView
             {
                 RectTransform = boxRectTransform,
+                Label = label,
                 Record = new LabelRecord()
             };
         }
