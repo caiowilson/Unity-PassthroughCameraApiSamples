@@ -214,7 +214,19 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             {
                 if (!HasExistingMarkerInBoundingBox(box))
                 {
-                    LogSpatialAnchor($"spawn marker {box.ClassName}");
+                    // Slice 4 Task 3 Step 1: log the RESOLVED DISTANCE with each marker.
+                    //
+                    // The plan requires measuring the current placement offset before
+                    // changing placement, and slice 2 could only produce the tester's
+                    // qualitative "some cm from the object". Logging resolved distance
+                    // makes that measurable: put an object at a tape-measured distance,
+                    // tag it, and compare. The difference IS the depth error, which is
+                    // what the median-sampling change has to improve on.
+                    var markerPos = box.BoxRectTransform.position;
+                    var camPos = m_cameraAccess.GetCameraPose().position;
+                    LogSpatialAnchor($"spawn marker {box.ClassName} " +
+                                     $"resolvedDistance={Vector3.Distance(camPos, markerPos):F3}m " +
+                                     $"worldPos=({markerPos.x:F3},{markerPos.y:F3},{markerPos.z:F3})");
                     var marker = Instantiate(m_spawnMarker, box.BoxRectTransform.position, box.BoxRectTransform.rotation, m_uiInference.ContentParent);
                     marker.GetComponent<DetectionSpawnMarkerAnim>().SetYoloClassName(box.ClassName);
 
