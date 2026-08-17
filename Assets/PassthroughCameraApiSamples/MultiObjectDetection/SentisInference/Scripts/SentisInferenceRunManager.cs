@@ -238,6 +238,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         {
             if (!m_cameraAccess.IsPlaying)
             {
+                // Final-review fix (Important #1): invalidate the live candidate on
+                // every early exit, not just inside DrawUIBoxes -- otherwise a stale
+                // candidate from a previous tick keeps getting re-billboarded as if
+                // it were still live. See InvalidateLiveCandidate's comment.
+                m_uiInference.InvalidateLiveCandidate();
                 yield break;
             }
 
@@ -246,6 +251,9 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             if (!ovrp_GetNodePoseStateAtTime(OVRPlugin.GetTimeInSeconds(), OVRPlugin.Node.Head, out _).IsSuccess())
             {
                 Debug.Log("ovrp_GetNodePoseStateAtTime failed, which means 'm_cameraAccess.GetCameraPose()' is not reliable, skipping.");
+                // Final-review fix (Important #1): see the comment above this
+                // method's first yield break.
+                m_uiInference.InvalidateLiveCandidate();
                 yield break;
             }
 
@@ -271,6 +279,9 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             using var boxes = boxesAwaiter.GetResult();
             if (boxes.shape[0] == 0)
             {
+                // Final-review fix (Important #1): see the comment above this
+                // method's first yield break.
+                m_uiInference.InvalidateLiveCandidate();
                 yield break;
             }
 
@@ -283,6 +294,9 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             if (classIDs.shape[0] == 0)
             {
                 Debug.LogError("classIDs.shape[0] == 0");
+                // Final-review fix (Important #1): see the comment above this
+                // method's first yield break.
+                m_uiInference.InvalidateLiveCandidate();
                 yield break;
             }
 
@@ -295,6 +309,9 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             if (scores.shape[0] == 0)
             {
                 Debug.LogError("scores.shape[0] == 0");
+                // Final-review fix (Important #1): see the comment above this
+                // method's first yield break.
+                m_uiInference.InvalidateLiveCandidate();
                 yield break;
             }
 
@@ -316,6 +333,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             if (!m_cameraAccess.IsPlaying || !anchorTracked)
             {
+                // Final-review fix (Important #1): see the comment above this
+                // method's first yield break. This exit matters most: it's the
+                // one EraseSpatialAnchor's anchor-loss path routes through, and
+                // that path also calls m_uiInference.ClearAnnotations() -- which
+                // only clears committed labels, not the live candidate/ghost.
+                // Without this call the ghost would survive even after every
+                // real label is wiped.
+                m_uiInference.InvalidateLiveCandidate();
                 yield break;
             }
 

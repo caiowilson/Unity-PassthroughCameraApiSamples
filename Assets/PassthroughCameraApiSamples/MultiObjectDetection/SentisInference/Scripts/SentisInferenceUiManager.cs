@@ -34,27 +34,29 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // that projection now happens every FRAME (RefreshLabelViews, called from
         // Update()), not once per DrawUIBoxes call at inference cadence — see
         // RefreshLabelViews's comment for why that distinction was the whole point
-        // of this fix wave. Task 4 retires this view; until then it is the only
-        // consumer of LabelRecord's WorldPosition.
+        // of this fix wave. BoxView is not retired: it remains the pairing
+        // wrapper for every committed label, and the only consumer of
+        // LabelRecord's WorldPosition.
         //
         // Deliberately a private pairing wrapper rather than a public List<LabelRecord>
         // plus a parallel List<RectTransform>: two lists kept in sync by index drift
-        // apart the moment one is reordered or removed from mid-list (exactly what
-        // GetOrCreateBoxView's removal-during-iteration does below), and LabelRecord
-        // itself must not hold a RectTransform. The pairing wrapper is what makes both
-        // constraints satisfiable at once. Task 2 moved matching off the
+        // apart the moment one is reordered or removed independently of the
+        // other, and LabelRecord itself must not hold a RectTransform. The
+        // pairing wrapper is what makes both constraints satisfiable at once.
+        // Task 2 moved matching off the
         // RectTransform entirely (class+world-distance over LabelRecord.WorldPosition,
         // see LabelAssociation.cs) — the RectTransform here is now pure output, never
         // read for matching.
         // Object Tagger slice 5 Task 4: Label is resolved ONCE, in
         // GetViewFromPoolOrCreate, and cached here rather than looked up per-frame
         // via GetComponentInChildren<Text>() inside DrawUIBoxes. That per-frame
-        // lookup would have been broken: DrawUIBoxes calls SetActive(false) on
-        // unconfirmed views (Task 3's visibility gate), the source prefab itself
-        // is already inactive by the time any clone is made (see Awake()), and
-        // the no-argument GetComponentInChildren<T>() overload defaults
+        // lookup would have been broken: freshly-created and pooled views start
+        // deactivated (see GetViewFromPoolOrCreate) until one of their three
+        // activation call sites runs, the source prefab itself is already
+        // inactive by the time any clone is made (see Awake()), and the
+        // no-argument GetComponentInChildren<T>() overload defaults
         // includeInactive to false — so a per-frame lookup would return null on
-        // every still-unconfirmed label and throw a NullReferenceException on
+        // every still-inactive label and throw a NullReferenceException on
         // `.text`. Resolving once with includeInactive:true at creation time
         // (see GetViewFromPoolOrCreate) sidesteps that entirely, and is still a
         // VIEW-side cache, not new state: Label is derived once from the
@@ -618,19 +620,25 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 if (i == liveCandidateDetectionIndex)
                 {
                     // Final-review fix (Important #2): only smooth when this tick's
-                    // candidate is the SAME identity as last tick's -- i.e. same
-                    // ClassId, the only identity information LiveCandidateState
-                    // carries. Without this check, panning from one object to a
-                    // different one (e.g. chair -> cup) lerped the position from the
-                    // old object's last known position toward the new one's, handing
-                    // out a LiveCandidateState with the new object's class/name but a
-                    // position partway between the two, in empty space -- and a
-                    // commit during that transient window would persist that wrong
-                    // position permanently (labels never auto-expire, and
-                    // AssociationDistanceMeters is small enough it would never
-                    // re-associate back to the real object). A genuine identity
-                    // change snaps straight to worldSpaceCenter instead.
-                    var smoothedGhostPosition = m_liveCandidate.HasValue && m_liveCandidate.Value.ClassId == detection.classId
+                    // candidate is the SAME identity as last tick's -- same ClassId
+                    // AND within AssociationDistanceMeters of last tick's position,
+                    // the same criterion FindAssociationIndex uses to decide whether
+                    // two detections are "the same object." A class-only check isn't
+                    // enough: panning between two different objects of the same class
+                    // (e.g. two chairs) still passed it, lerping the ghost's position
+                    // through empty space between them -- handing out a
+                    // LiveCandidateState with the right class/name but a position
+                    // partway between the two objects. A commit during that transient
+                    // window would persist that wrong position permanently (labels
+                    // never auto-expire, and AssociationDistanceMeters is small enough
+                    // it would never re-associate back to the real object). A genuine
+                    // identity change -- different class, or the same class too far
+                    // from last tick's position -- snaps straight to worldSpaceCenter
+                    // instead.
+                    var isSameCandidate = m_liveCandidate.HasValue
+                        && m_liveCandidate.Value.ClassId == detection.classId
+                        && Vector3.Distance(m_liveCandidate.Value.WorldPosition, worldSpaceCenter) <= AssociationDistanceMeters;
+                    var smoothedGhostPosition = isSameCandidate
                         ? LabelPresentation.Smooth(m_liveCandidate.Value.WorldPosition, worldSpaceCenter, SmoothingFactor)
                         : worldSpaceCenter;
                     newLiveCandidate = new LiveCandidateState(detection.classId, classname, smoothedGhostPosition, detection.score);
@@ -843,6 +851,22 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             {
                 m_ghostView.RectTransform.gameObject.SetActive(false);
             }
+        }
+
+        // Final-review fix (Important #1): m_liveCandidate only changes inside
+        // DrawUIBoxes, but DrawUIBoxes is skipped entirely on RunInference's
+        // early-exit paths (camera not playing, head-pose unreliable, empty
+        // boxes/classIDs/scores, anchor not tracked). Without this, a stale
+        // m_liveCandidate from a previous tick keeps getting re-billboarded by
+        // Update()'s RefreshGhostView, looking like a live tracking preview at
+        // a position that is no longer being detected -- and a commit during
+        // that window persists it permanently. Exposed so RunInference can call
+        // it directly from each of its early-exit branches, not just from
+        // DrawUIBoxes's own detections.Count == 0 branch.
+        internal void InvalidateLiveCandidate()
+        {
+            m_liveCandidate = null;
+            HideGhostView();
         }
 
         private BoxView GetViewFromPoolOrCreate()

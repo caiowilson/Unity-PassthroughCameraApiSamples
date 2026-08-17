@@ -60,8 +60,7 @@ namespace ObjectTagger.Tests.EditMode
         [Test]
         public void IsOverlappingFalseAtThreshold()
         {
-            // Strict '<', mirroring LabelPresentation.IsExpired's own
-            // strict-boundary convention: exactly AT the threshold is "clear".
+            // Strict '<': exactly AT the threshold is "clear", not overlapping.
             Assert.IsFalse(LabelOverlap.IsOverlapping(ThresholdDegrees, ThresholdDegrees));
         }
 

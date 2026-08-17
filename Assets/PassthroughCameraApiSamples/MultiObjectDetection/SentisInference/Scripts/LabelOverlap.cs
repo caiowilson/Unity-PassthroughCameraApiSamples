@@ -3,9 +3,10 @@
 // Object Tagger slice 5 Task 5 Step 1 — visual overlap between DIFFERENT
 // labels, resolved by offsetting the farther one vertically.
 //
-// This is a purely RENDER-TIME concern, distinct from LabelAssociation.Decide
-// (which decides which DETECTION updates which RECORD, per-class, in
-// SentisInferenceUiManager.GetOrCreateBoxView). Two different labels — could
+// This is a purely RENDER-TIME concern, distinct from
+// LabelAssociation.FindAssociationIndex (which decides which DETECTION
+// updates which RECORD, per-class, via
+// SentisInferenceUiManager.FindAssociatedViewIndex). Two different labels — could
 // be different classes, or same class but far enough apart in the world that
 // association correctly treats them as separate objects — can still end up
 // visually crowded or overlapping as seen from the camera. That is what this
@@ -53,8 +54,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         /// Whether two labels, at the given angular separation, are close
         /// enough in the camera's view to be considered visually
         /// overlapping/crowded. Strict `<` (not `<=`): exactly AT the
-        /// threshold reads as "just clear", mirroring
-        /// LabelPresentation.IsExpired's own strict-boundary convention.
+        /// threshold reads as "just clear" rather than "still overlapping",
+        /// so a pair sitting precisely at the boundary is not pushed apart.
         public static bool IsOverlapping(float angularSeparationDegrees, float thresholdDegrees)
         {
             return angularSeparationDegrees < thresholdDegrees;
@@ -67,18 +68,19 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         ///
         /// PURE FUNCTION, no RectTransform/GameObject/MonoBehaviour: takes a
         /// snapshot of base (unsmoothed-by-offset) world positions in, returns
-        /// offsets out — same shape as LabelAssociation.Decide. This matters
-        /// for more than testability: it is also what keeps Stop Condition 4
-        /// (state must not move back into RectTransforms) intact. Reading a
-        /// RectTransform's CURRENT position and adding to it would make the
-        /// offset accumulate across frames for any view that stays visible-but-
-        /// undetected for multiple DrawUIBoxes calls (confirmed, still inside
-        /// its grace period, but not re-detected this particular frame) —
-        /// across a 3-second grace period at several inferences/sec that climbs
-        /// the card out of view. Recomputing fresh from basePositions
-        /// (LabelRecord.SmoothedPosition) every call and having the caller
-        /// ASSIGN (not add) the result back to the RectTransform makes that
-        /// class of bug structurally impossible.
+        /// offsets out — same shape as LabelAssociation.FindAssociationIndex.
+        /// This matters for more than testability: it is also what keeps Stop
+        /// Condition 4 (state must not move back into RectTransforms) intact.
+        /// Reading a RectTransform's CURRENT position and adding to it would
+        /// make the offset accumulate across frames for any view that stays
+        /// visible-but-undetected for multiple DrawUIBoxes calls — the normal
+        /// case for any committed label not currently being re-detected, since
+        /// labels never auto-expire and simply stay at their last associated
+        /// position — climbing the card out of view with no bound on how far.
+        /// Recomputing fresh from basePositions (LabelRecord.SmoothedPosition)
+        /// every call and having the caller ASSIGN (not add) the result back
+        /// to the RectTransform makes that class of bug structurally
+        /// impossible.
         ///
         /// Pairwise, in index order (i &lt; j): each pair whose angular
         /// separation is below threshold pushes the farther-from-camera index
