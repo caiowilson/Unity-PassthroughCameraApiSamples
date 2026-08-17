@@ -100,12 +100,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         /// fixed-point iteration that re-checks every pair after every push.
         /// It handles the plan's stated case (two labels) exactly, and behaves
         /// sanely (no crash, no runaway growth, no unbounded stacking) with
-        /// 3+ labels, but is not guaranteed to leave every pair in a cluster
-        /// fully clear of every other pair after one pass — see the class-level
-        /// note in SentisInferenceUiManager.ApplyOverlapOffsets for the known
-        /// limitation this simplification carries (angular separation is a
-        /// cone test, not a 2D rect test, so it cannot distinguish horizontal
-        /// from vertical crowding).
+        /// 3+ labels. Once a pair IS flagged, a single vertical push reliably
+        /// clears it (the push's own angular effect is roughly constant
+        /// regardless of distance, so it only adds to any existing separation).
+        /// The real known limitation runs the other way — see
+        /// SentisInferenceUiManager.OverlapAngleThresholdDegrees's comment: a
+        /// threshold tuned to the card's HEIGHT under-triggers for
+        /// horizontally-crowded pairs, since the rendered text is far WIDER
+        /// than it is tall.
         public static float[] ComputeVerticalOffsets(
             Vector3 cameraPosition,
             IReadOnlyList<Vector3> basePositions,

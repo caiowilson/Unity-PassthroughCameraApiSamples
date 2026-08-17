@@ -173,19 +173,28 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // 3deg figure applies unchanged across the whole 1-4m acceptance range;
         // it needs no distance term, unlike the offset amount below which does.
         //
-        // KNOWN LIMITATION: Vector3.Angle (see LabelOverlap.AngularSeparationDegrees)
-        // is a CONE test around the camera -- it does not distinguish horizontal
-        // from vertical crowding. Two cards sitting side-by-side horizontally at
-        // 2deg apart are legible on screen but get flagged as overlapping, and
-        // pushing one of them UP barely changes the cone angle between them, so
-        // such a pair can stay flagged as overlapping even after the offset is
-        // applied. The offset pass is still stable (no crash, no runaway growth,
-        // one push per pair per DrawUIBoxes call, see LabelOverlap.ComputeVerticalOffsets)
-        // -- it just does not guarantee full legibility for that specific
-        // horizontal-crowding case. Accepted per the task brief's own scope
-        // note: a correct pairwise resolution that behaves sanely under 3+
-        // labels is sufficient; a 2D-rect projection test would fix this but is
-        // more machinery than the stated two-label scenario calls for.
+        // KNOWN LIMITATION -- this threshold is derived from the card's
+        // HEIGHT (~2.86deg, above), but the card is far WIDER than it is
+        // tall: legacy Text with m_HorizontalOverflow allowing unconstrained
+        // width, cap height 0.025m, and a string like "cell phone — 45%" at
+        // roughly 17 characters renders to something in the neighbourhood of
+        // 0.2m wide -- an angular WIDTH around 11-12deg at 1m, roughly 4x this
+        // 3deg threshold. Vector3.Angle (see LabelOverlap.AngularSeparationDegrees)
+        // is a CONE test around the camera and does not distinguish horizontal
+        // from vertical crowding, so two labels separated horizontally by, say,
+        // 5deg -- close enough that their TEXT visibly overlaps -- are NOT
+        // flagged by this test at all (5deg > 3deg threshold). This is an
+        // UNDER-trigger for horizontal crowding, not an over-trigger: once a
+        // pair IS flagged, a single vertical push does reliably clear it (the
+        // push's own angular effect, offsetAtReferenceDistance/referenceDistance
+        // in radians =~ 3.4deg regardless of distance, combines with any
+        // existing horizontal separation via combining as a rough right-angle
+        // sum, so the resulting separation only grows). Not corrected here:
+        // raising the threshold to card-WIDTH would flag most same-row pairs
+        // and cause aggressive, over-eager stacking, and is unvalidated
+        // against the task brief's stated two-label scenario. Left as a known
+        // gap for Task 6's device gate to look for (horizontally adjacent text
+        // that visually overlaps but was never offset).
         private const float OverlapAngleThresholdDegrees = 3f;
 
         // Object Tagger slice 5 Task 5 Step 1 — overlap offset amount.
@@ -633,14 +642,22 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 }
             }
 
-            if (visibleViews.Count < 2)
+            if (visibleViews.Count == 0)
             {
-                // 0 or 1 visible views: nothing can overlap. Still worth an
-                // explicit early-out rather than relying on
-                // ComputeVerticalOffsets's inner loop to no-op, since it also
-                // skips allocating the basePositions snapshot below for the
-                // overwhelmingly common case (most frames have far fewer than
-                // 2 confirmed labels close enough in view to matter).
+                // Nothing to reset. Deliberately NOT short-circuiting on
+                // Count == 1 as well: a lone visible view still needs to run
+                // through the snapshot-and-assign below so a PREVIOUSLY
+                // applied offset gets cleared once its overlap partner is no
+                // longer around to justify it (e.g. the nearer of a pair
+                // expired since the last frame this pass ran, or wasn't
+                // re-detected this frame). With one view, ComputeVerticalOffsets
+                // always returns [0], so the assignment below resets that
+                // view's RectTransform.position back to its bare
+                // SmoothedPosition -- the reset IS the point, not wasted work.
+                // Skipping it here would leave a stale 6cm offset baked into
+                // the RectTransform with nothing left to clear it, breaking
+                // the "always derived fresh from the record" invariant this
+                // whole method exists to uphold.
                 return;
             }
 
