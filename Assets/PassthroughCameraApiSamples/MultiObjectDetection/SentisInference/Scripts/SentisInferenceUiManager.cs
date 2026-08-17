@@ -105,9 +105,9 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // SmoothedPosition = Lerp(...)". That was wrong about WHEN smoothing runs:
         // LabelPresentation.Smooth is called once per ACCEPTED ASSOCIATION (i.e. once
         // per DrawUIBoxes call that re-detects this label), which happens at inference
-        // cadence -- the same placeholder ~1 inference/sec worst-case assumption
-        // ConfirmationsBeforeVisible's comment uses -- not at frame rate (which can be
-        // tens of times faster). Corrected: SmoothedPosition = Lerp(SmoothedPosition,
+        // cadence -- under a placeholder ~1 inference/sec worst-case cadence
+        // assumption -- not at frame rate (which can be tens of times faster).
+        // Corrected: SmoothedPosition = Lerp(SmoothedPosition,
         // WorldPosition, SmoothingFactor) is applied once per accepted association.
         //
         // Factor should be in (0, 1): smaller values smooth more heavily, larger
@@ -530,6 +530,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             {
                 OnObjectsDetected?.Invoke(0);
                 m_liveCandidate = null;
+                HideGhostView();
                 return;
             }
 
@@ -616,7 +617,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
                 if (i == liveCandidateDetectionIndex)
                 {
-                    var smoothedGhostPosition = m_liveCandidate.HasValue
+                    // Final-review fix (Important #2): only smooth when this tick's
+                    // candidate is the SAME identity as last tick's -- i.e. same
+                    // ClassId, the only identity information LiveCandidateState
+                    // carries. Without this check, panning from one object to a
+                    // different one (e.g. chair -> cup) lerped the position from the
+                    // old object's last known position toward the new one's, handing
+                    // out a LiveCandidateState with the new object's class/name but a
+                    // position partway between the two, in empty space -- and a
+                    // commit during that transient window would persist that wrong
+                    // position permanently (labels never auto-expire, and
+                    // AssociationDistanceMeters is small enough it would never
+                    // re-associate back to the real object). A genuine identity
+                    // change snaps straight to worldSpaceCenter instead.
+                    var smoothedGhostPosition = m_liveCandidate.HasValue && m_liveCandidate.Value.ClassId == detection.classId
                         ? LabelPresentation.Smooth(m_liveCandidate.Value.WorldPosition, worldSpaceCenter, SmoothingFactor)
                         : worldSpaceCenter;
                     newLiveCandidate = new LiveCandidateState(detection.classId, classname, smoothedGhostPosition, detection.score);
@@ -624,6 +638,19 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
 
             m_liveCandidate = newLiveCandidate;
+            if (!m_liveCandidate.HasValue)
+            {
+                // Final-review fix (Important #1): the candidate detection this tick
+                // either didn't exist (handled above) or its depth probe missed (this
+                // path) -- either way m_liveCandidate just transitioned to null. Hide
+                // the ghost right here rather than deferring to RefreshGhostView:
+                // RefreshGhostView only runs from Update(), past a guard
+                // (`m_boxViews.Count == 0 && !m_liveCandidate.HasValue`) that -- with
+                // no committed labels and now no live candidate -- is true starting
+                // this exact tick, so RefreshGhostView would never run again and the
+                // ghost's GameObject would stay active forever at its last position.
+                HideGhostView();
+            }
         }
 
         // Object Tagger slice 5 Task 5 Step 1, simplified by manual-tagging
@@ -800,20 +827,46 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_ghostView.RectTransform.position = candidate.WorldPosition;
         }
 
+        // Object Tagger manual-tagging Task 3 fix — hides the ghost view if it
+        // exists yet. Null-guarded because m_ghostView is created lazily
+        // (CreateGhostView, via GetViewFromPoolOrCreate) on first use inside
+        // RefreshGhostView, so it may not exist yet the first time
+        // m_liveCandidate transitions to null (e.g. the very first
+        // DrawUIBoxes call with zero detections). Called from DrawUIBoxes at
+        // both points m_liveCandidate can transition from having a value to
+        // null, so the ghost is hidden immediately rather than left showing
+        // stale text until a RefreshGhostView call that may never come (see
+        // the call sites' comments).
+        private void HideGhostView()
+        {
+            if (m_ghostView != null)
+            {
+                m_ghostView.RectTransform.gameObject.SetActive(false);
+            }
+        }
+
         private BoxView GetViewFromPoolOrCreate()
         {
-            // Object Tagger slice 5 Task 3: do NOT activate here. Visibility is
-            // gated on ConfirmationCount — labels start invisible and only become
-            // visible once ConfirmationCount >= ConfirmationsBeforeVisible. Final-
-            // review fix: that gate is now applied by RefreshLabelViews (Update()'s
-            // per-frame visual pass), not DrawUIBoxes — see RefreshLabelViews's
-            // comment. Activating here would cause freshly-spawned labels to flash
-            // visible for the remainder of the frame before that pass runs. Keeping
-            // activation deactivated here keeps the invariant in one place.
+            // Object Tagger manual-tagging Task 3 fix: do NOT activate here.
+            // Visibility is no longer gated by a confirmation count -- that
+            // mechanism (ConfirmationCount / ConfirmationsBeforeVisible) was
+            // deleted this task, and RefreshLabelViews no longer calls
+            // SetActive at all. Activation is instead controlled from three
+            // separate call sites, each owning its own view's on-screen
+            // state: TryCommitLiveCandidate activates a freshly-spawned
+            // committed label at the moment it is committed; CreateGhostView
+            // deactivates the ghost view immediately after creating it; and
+            // RefreshGhostView toggles the ghost active/inactive every frame
+            // based on whether m_liveCandidate currently has a value.
+            // (ReturnToPool also deactivates a view, but that is the pool's
+            // own "nothing in the pool is visible" invariant, not one of
+            // these three.) Activating here, before any of those call sites
+            // runs, would risk a freshly-created view flashing visible for a
+            // frame before its owning call site sets its real state.
             if (m_boxViewPool.Count > 0)
             {
                 var pooled = m_boxViewPool[m_boxViewPool.Count - 1];
-                // Do not activate; RefreshLabelViews controls visibility.
+                // Do not activate; the three call sites above control visibility.
                 m_boxViewPool.RemoveAt(m_boxViewPool.Count - 1);
                 return pooled;
             }
@@ -827,7 +880,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // just later. See the BoxView.Label comment for why this must be
             // cached rather than looked up per-frame.
             var label = boxRectTransform.GetComponentInChildren<Text>(true);
-            // Start deactivated; RefreshLabelViews controls visibility.
+            // Start deactivated; the three call sites above control visibility.
             boxRectTransform.gameObject.SetActive(false);
             return new BoxView
             {
