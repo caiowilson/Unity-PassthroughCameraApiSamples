@@ -78,27 +78,26 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger slice 5 Task 2 — the association distance threshold.
         //
-        // 2.00m. This is a direct, explicit user ruling, given twice, not a value
-        // derived from engineering analysis of slice 4's scatter data. The plan's
-        // guidance was a threshold "in the tens of centimetres"; an earlier,
-        // incomplete SDD ledger already recorded the user overriding that guidance
-        // to 2.00m after being shown the conflict, but that ledger entry was never
-        // acted on — Task 2 was first implemented at 0.3m by an implementer who
-        // reasoned independently from slice 4's numbers without ever seeing the
-        // ruling. This reopening corrects that miss and restores the user's
-        // explicit value.
+        // 2.00m (200cm), set by explicit user ruling, given twice and
+        // reconfirmed directly on 2026-08-16. See D-slice5-2 in the docs
+        // repo's validation record, ~/Work/object-tagger/docs/validation/
+        // 2026-08-15-slice-5-labels.md. This overrides the plan's own
+        // advisory guidance of a threshold "in the tens of centimetres" —
+        // Task 2 was first implemented at 0.3m, reasoning independently from
+        // that guidance and from slice 4's scatter data
+        // (docs/validation/2026-08-15-slice-4-spatial-placement.md: mean
+        // accuracy ~2cm, scatter +/-13cm, one disputed 27.5cm reading,
+        // D-slice4-2) without ever seeing the ruling. This is a fix, not a
+        // re-derivation: 2.00m is final and is not being re-litigated here.
         //
-        // Known consequence, already flagged in that ledger and not yet
-        // contradicted by evidence: the acceptance room places same-class objects
-        // (e.g. two chairs) within 2m of each other routinely, so a 2.00m
-        // threshold will associate them into ONE label instead of two. This is
-        // the opposite failure mode from the 0.3m value it replaces, which was
-        // chosen specifically to avoid it. Task 6's gate step — "two simultaneous
-        // labels, individually legible" — is the empirical test that will surface
-        // this if it turns out to be wrong in practice. Do not shrink this value
-        // to pass that gate without going back to the user first: it is
-        // authority, not oversight.
-        private const float AssociationDistanceMeters = 2.00f;
+        // Known, accepted cost of this value: two same-class objects within
+        // 2m of each other (e.g. two chairs at a table) will now associate
+        // into one label instead of two — the opposite failure mode from the
+        // 0.3m value it replaces. This is exactly the tradeoff ruling #7 in
+        // this workspace's progress.md already accepts. Task 6 Step 2 ("two
+        // simultaneous labels, individually legible") is the empirical check
+        // for whether it holds up in practice.
+        private const float AssociationDistanceMeters = 2.0f;
 
         // Object Tagger slice 5 Task 3: confirmation count before a label becomes visible.
         //
