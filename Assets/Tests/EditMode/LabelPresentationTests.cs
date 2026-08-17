@@ -1,9 +1,11 @@
-// Object Tagger slice 5 Task 3 — edit-mode tests for label presentation logic
-// (confirmation, smoothing, expiry).
+// Object Tagger slice 5 Task 3, simplified by manual-tagging Task 3 —
+// edit-mode tests for label presentation logic (smoothing, billboard/scale).
 //
-// These tests satisfy Task 3 Step 4: confirmation threshold boundary, smoothing
-// convergence, and expiry boundary must be assertable as pure logic with no
-// RectTransform, GameObject, MonoBehaviour, or scene.
+// The Confirmation Threshold and Expiry sections are deleted along with
+// IsVisible/IsExpired themselves — see LabelPresentation.cs's header for why.
+// What remains satisfies smoothing convergence and the minimum-apparent-size
+// scale / billboard rotation as pure logic, with no RectTransform, GameObject,
+// MonoBehaviour, or scene.
 
 using NUnit.Framework;
 using PassthroughCameraSamples.MultiObjectDetection;
@@ -13,44 +15,6 @@ namespace ObjectTagger.Tests.EditMode
 {
     public class LabelPresentationTests
     {
-        private const float GracePeriod = 3f;
-        private const int ConfirmationThreshold = 2;
-
-        // ===== Confirmation Threshold Tests =====
-
-        [Test]
-        public void IsVisibleReturnsFalseWhenBelowThreshold()
-        {
-            // N-1 confirmations → not yet visible.
-            var isVisible = LabelPresentation.IsVisible(
-                confirmationCount: ConfirmationThreshold - 1,
-                confirmationThreshold: ConfirmationThreshold);
-
-            Assert.IsFalse(isVisible, "a label with fewer than N confirmations must not be visible");
-        }
-
-        [Test]
-        public void IsVisibleReturnsTrueAtThreshold()
-        {
-            // Exactly N confirmations → now visible.
-            var isVisible = LabelPresentation.IsVisible(
-                confirmationCount: ConfirmationThreshold,
-                confirmationThreshold: ConfirmationThreshold);
-
-            Assert.IsTrue(isVisible, "a label with exactly N confirmations must become visible");
-        }
-
-        [Test]
-        public void IsVisibleReturnsTrueAboveThreshold()
-        {
-            // N+1 confirmations → stays visible.
-            var isVisible = LabelPresentation.IsVisible(
-                confirmationCount: ConfirmationThreshold + 1,
-                confirmationThreshold: ConfirmationThreshold);
-
-            Assert.IsTrue(isVisible, "a label with more than N confirmations must remain visible");
-        }
-
         // ===== Smoothing Convergence Tests =====
 
         [Test]
@@ -132,69 +96,6 @@ namespace ObjectTagger.Tests.EditMode
             var result = LabelPresentation.Smooth(smoothed, target, factor);
 
             Assert.AreEqual(target, result, "with factor 1, position should jump to target");
-        }
-
-        // ===== Expiry Tests =====
-
-        [Test]
-        public void IsExpiredReturnsFalseWhenRecentlyUpdated()
-        {
-            // Just updated -> not expired.
-            float lastSeenTime = 10f;
-            float currentTime = 10.5f;
-
-            var isExpired = LabelPresentation.IsExpired(lastSeenTime, currentTime, GracePeriod);
-
-            Assert.IsFalse(isExpired, "a recently updated label must not be expired");
-        }
-
-        [Test]
-        public void IsExpiredReturnsFalseJustBeforeGracePeriod()
-        {
-            // Just before the 3s boundary.
-            float lastSeenTime = 0f;
-            float currentTime = 2.9f;
-
-            var isExpired = LabelPresentation.IsExpired(lastSeenTime, currentTime, GracePeriod);
-
-            Assert.IsFalse(isExpired, "just before grace period, label must not be expired");
-        }
-
-        [Test]
-        public void IsExpiredReturnsTrueAtGracePeriod()
-        {
-            // Exactly at the boundary (elapsed > GracePeriod).
-            float lastSeenTime = 0f;
-            float currentTime = 3f;
-
-            var isExpired = LabelPresentation.IsExpired(lastSeenTime, currentTime, GracePeriod);
-
-            // With >, 3f - 0f = 3f is NOT > 3f, so not expired.
-            Assert.IsFalse(isExpired, "at exactly grace period boundary, not expired yet");
-        }
-
-        [Test]
-        public void IsExpiredReturnsTrueJustAfterGracePeriod()
-        {
-            // Just past the 3s boundary (elapsed > GracePeriod).
-            float lastSeenTime = 0f;
-            float currentTime = 3.1f;
-
-            var isExpired = LabelPresentation.IsExpired(lastSeenTime, currentTime, GracePeriod);
-
-            Assert.IsTrue(isExpired, "just after grace period, label must be expired");
-        }
-
-        [Test]
-        public void IsExpiredReturnsTrueWhenWayPastGracePeriod()
-        {
-            // Well past grace period.
-            float lastSeenTime = 0f;
-            float currentTime = 10f;
-
-            var isExpired = LabelPresentation.IsExpired(lastSeenTime, currentTime, GracePeriod);
-
-            Assert.IsTrue(isExpired, "long after grace period, label must be expired");
         }
 
         // ===== Minimum-Apparent-Size Scale Tests (slice 5 Task 4 Step 3) =====

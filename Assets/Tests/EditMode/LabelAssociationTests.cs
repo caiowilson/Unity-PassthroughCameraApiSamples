@@ -1,11 +1,11 @@
-// Object Tagger slice 5 Task 2 — edit-mode tests for class+world-distance
-// label association.
+// Object Tagger slice 5 Task 2, simplified by manual-tagging Task 3 —
+// edit-mode tests for class+world-distance label matching.
 //
-// These exist to satisfy Task 2 Step 4: the matching decision must be
-// assertable as pure logic — given existing label snapshots (class id, world
-// position, last-seen time) and a new observation (class id, world position),
-// which associate, which spawn, which trigger the re-placement removal. No
-// RectTransform, no GameObject, no MonoBehaviour, no scene.
+// The grace-period/re-placement tests from slice 5 (SameClassButFarSpawns...,
+// SameClassFarAndOutsideGracePeriod..., SameFrameSameClassFarCandidate...,
+// AmbiguousMultipleStaleSameClassCandidates...) are deleted along with the
+// rule they tested: FindAssociationIndex has no removal/re-placement
+// behavior left to pin.
 
 using System.Collections.Generic;
 using NUnit.Framework;
@@ -17,146 +17,69 @@ namespace ObjectTagger.Tests.EditMode
     public class LabelAssociationTests
     {
         private const float Threshold = 0.1f;
-        private const float GracePeriod = 3f;
 
-        private static List<LabelAssociation.Existing> One(int classId, Vector3 pos, float lastSeenTime) =>
-            new() { new LabelAssociation.Existing(classId, pos, lastSeenTime) };
+        private static List<LabelAssociation.Existing> One(int classId, Vector3 pos) =>
+            new() { new LabelAssociation.Existing(classId, pos) };
 
         [Test]
         public void SameClassAndCloseAssociates()
         {
             // 3cm away, well under the 0.1m threshold.
-            var existing = One(classId: 5, pos: new Vector3(1f, 0f, 2f), lastSeenTime: 0f);
+            var existing = One(classId: 5, pos: new Vector3(1f, 0f, 2f));
             var newPos = new Vector3(1.03f, 0f, 2f);
 
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 0.1f, Threshold, GracePeriod);
+            var index = LabelAssociation.FindAssociationIndex(existing, 5, newPos, Threshold);
 
-            Assert.AreEqual(0, decision.AssociatedIndex, "close same-class observation must reuse the existing label");
-            Assert.AreEqual(-1, decision.RemoveIndex, "an association must not also remove anything");
+            Assert.AreEqual(0, index, "close same-class observation must associate to the existing label");
         }
 
         [Test]
-        public void SameClassButFarSpawnsNewAndReapsTheStaleOne()
+        public void DifferentClassOverlappingDoesNotAssociate()
         {
-            // 5m away — unambiguously outside the 0.1m threshold — but still
-            // inside the 3s grace period (only 0.5s old). This is the
-            // moved-object case Step 3 targets: exactly one same-class
-            // candidate, so it is unambiguous.
-            var existing = One(classId: 5, pos: new Vector3(0f, 0f, 0f), lastSeenTime: 1.0f);
-            var newPos = new Vector3(5f, 0f, 0f);
-
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 1.5f, Threshold, GracePeriod);
-
-            Assert.AreEqual(-1, decision.AssociatedIndex, "far observation must spawn a new label, not reuse");
-            Assert.AreEqual(0, decision.RemoveIndex, "the unique stale same-class label must be reaped immediately");
-        }
-
-        [Test]
-        public void SameClassFarAndOutsideGracePeriodSpawnsWithoutRemoval()
-        {
-            // Already past the grace period -> Update()'s own expiry loop would
-            // already have reaped this; the re-placement rule must not double-fire.
-            var existing = One(classId: 5, pos: new Vector3(0f, 0f, 0f), lastSeenTime: 0f);
-            var newPos = new Vector3(5f, 0f, 0f);
-
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 5f, Threshold, GracePeriod);
-
-            Assert.AreEqual(-1, decision.AssociatedIndex);
-            Assert.AreEqual(-1, decision.RemoveIndex, "an already-expired candidate is not this rule's concern");
-        }
-
-        [Test]
-        public void SameFrameSameClassFarCandidateIsNotReaped()
-        {
-            // Two SEPARATE same-class objects visible in the SAME frame, e.g. two
-            // chairs 5m apart. DrawUIBoxes stamps LastSeenTime with the same
-            // Time.time for every detection processed this frame, so the first
-            // one placed (R1) has age == 0 relative to the second detection (B)
-            // being decided right now. R1 must NOT read as "the previous label of
-            // an object that moved" — it is a currently-visible different
-            // instance. Regression test: without the age > 0 guard, R1 would be
-            // the unique in-grace same-class candidate and get wrongly reaped,
-            // collapsing every simultaneously-visible instance of a class to one
-            // per frame.
-            var existing = One(classId: 5, pos: new Vector3(0f, 0f, 0f), lastSeenTime: 10f);
-            var newPos = new Vector3(5f, 0f, 0f);
-
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 10f, Threshold, GracePeriod);
-
-            Assert.AreEqual(-1, decision.AssociatedIndex, "far same-class observation must still spawn a new label");
-            Assert.AreEqual(-1, decision.RemoveIndex, "a same-frame (age == 0) candidate is a different instance, not a stale previous label");
-        }
-
-        [Test]
-        public void AmbiguousMultipleStaleSameClassCandidatesReapsNeither()
-        {
-            // Two same-class labels, both far from the new observation and both
-            // still in grace. Narrowest-correct interpretation: we cannot tell
-            // which one (if either) moved, so neither is reaped — a lingering
-            // label for up to the grace period is preferable to misattributing an
-            // unrelated, still-present object's label.
-            var existing = new List<LabelAssociation.Existing>
-            {
-                new(classId: 5, worldPosition: new Vector3(0f, 0f, 0f), lastSeenTime: 1f),
-                new(classId: 5, worldPosition: new Vector3(5f, 0f, 0f), lastSeenTime: 1f),
-            };
-            var newPos = new Vector3(10f, 0f, 0f);
-
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 1.2f, Threshold, GracePeriod);
-
-            Assert.AreEqual(-1, decision.AssociatedIndex);
-            Assert.AreEqual(-1, decision.RemoveIndex, "ambiguous which stale record moved -> reap neither");
-        }
-
-        [Test]
-        public void DifferentClassOverlappingDoesNotEvict()
-        {
-            // Same position, different class. Upstream would have evicted this;
-            // the locked decision removes eviction entirely (Task 5 owns the
-            // visual offset for this case). Both must remain untouched.
-            var existing = One(classId: 5, pos: new Vector3(1f, 0f, 2f), lastSeenTime: 0f);
+            // Same position, different class. LabelOverlap owns the visual
+            // offset for this case; FindAssociationIndex must never match
+            // across classes.
+            var existing = One(classId: 5, pos: new Vector3(1f, 0f, 2f));
             var newPos = new Vector3(1f, 0f, 2f);
 
-            var decision = LabelAssociation.Decide(existing, 6, newPos, currentTime: 0.1f, Threshold, GracePeriod);
+            var index = LabelAssociation.FindAssociationIndex(existing, 6, newPos, Threshold);
 
-            Assert.AreEqual(-1, decision.AssociatedIndex, "different class must never associate");
-            Assert.AreEqual(-1, decision.RemoveIndex, "different-class overlap must not evict");
+            Assert.AreEqual(-1, index, "different class must never associate");
         }
 
         [Test]
         public void JustUnderThresholdAssociates()
         {
-            var existing = One(classId: 5, pos: Vector3.zero, lastSeenTime: 0f);
+            var existing = One(classId: 5, pos: Vector3.zero);
             var newPos = new Vector3(Threshold - 0.01f, 0f, 0f);
 
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 0.1f, Threshold, GracePeriod);
+            var index = LabelAssociation.FindAssociationIndex(existing, 5, newPos, Threshold);
 
-            Assert.AreEqual(0, decision.AssociatedIndex, "distance just under the threshold must associate");
+            Assert.AreEqual(0, index, "distance just under the threshold must associate");
         }
 
         [Test]
         public void ExactlyAtThresholdDoesNotAssociate()
         {
             // Strict less-than: a distance exactly equal to the threshold is
-            // treated as "not close enough", matching a half-open [0, threshold)
-            // band with no ambiguity at the boundary itself.
-            var existing = One(classId: 5, pos: Vector3.zero, lastSeenTime: 0f);
+            // treated as "not close enough".
+            var existing = One(classId: 5, pos: Vector3.zero);
             var newPos = new Vector3(Threshold, 0f, 0f);
 
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 0.1f, Threshold, GracePeriod);
+            var index = LabelAssociation.FindAssociationIndex(existing, 5, newPos, Threshold);
 
-            Assert.AreEqual(-1, decision.AssociatedIndex, "distance exactly at the threshold must not associate");
+            Assert.AreEqual(-1, index, "distance exactly at the threshold must not associate");
         }
 
         [Test]
         public void JustOverThresholdDoesNotAssociate()
         {
-            var existing = One(classId: 5, pos: Vector3.zero, lastSeenTime: 0f);
+            var existing = One(classId: 5, pos: Vector3.zero);
             var newPos = new Vector3(Threshold + 0.01f, 0f, 0f);
 
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 0.1f, Threshold, GracePeriod);
+            var index = LabelAssociation.FindAssociationIndex(existing, 5, newPos, Threshold);
 
-            Assert.AreEqual(-1, decision.AssociatedIndex, "distance just over the threshold must not associate");
+            Assert.AreEqual(-1, index, "distance just over the threshold must not associate");
         }
 
         [Test]
@@ -164,25 +87,24 @@ namespace ObjectTagger.Tests.EditMode
         {
             var existing = new List<LabelAssociation.Existing>
             {
-                new(classId: 5, worldPosition: new Vector3(0.08f, 0f, 0f), lastSeenTime: 0f),
-                new(classId: 5, worldPosition: new Vector3(0.03f, 0f, 0f), lastSeenTime: 0f),
+                new(classId: 5, worldPosition: new Vector3(0.08f, 0f, 0f)),
+                new(classId: 5, worldPosition: new Vector3(0.03f, 0f, 0f)),
             };
             var newPos = Vector3.zero;
 
-            var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 0.1f, Threshold, GracePeriod);
+            var index = LabelAssociation.FindAssociationIndex(existing, 5, newPos, Threshold);
 
-            Assert.AreEqual(1, decision.AssociatedIndex, "must reuse the nearer of two in-range same-class candidates");
+            Assert.AreEqual(1, index, "must associate to the nearer of two in-range same-class candidates");
         }
 
         [Test]
-        public void EmptyExistingSpawnsWithNoRemoval()
+        public void EmptyExistingReturnsNegativeOne()
         {
             var existing = new List<LabelAssociation.Existing>();
 
-            var decision = LabelAssociation.Decide(existing, 5, Vector3.zero, currentTime: 0f, Threshold, GracePeriod);
+            var index = LabelAssociation.FindAssociationIndex(existing, 5, Vector3.zero, Threshold);
 
-            Assert.AreEqual(-1, decision.AssociatedIndex);
-            Assert.AreEqual(-1, decision.RemoveIndex);
+            Assert.AreEqual(-1, index);
         }
     }
 }

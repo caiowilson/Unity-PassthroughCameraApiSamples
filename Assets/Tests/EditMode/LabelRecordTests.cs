@@ -28,9 +28,7 @@ namespace ObjectTagger.Tests.EditMode
                 ClassName = "chair",
                 WorldPosition = new Vector3(1f, 2f, 3f),
                 SmoothedPosition = new Vector3(1.1f, 2.1f, 3.1f),
-                LastAssociatedScore = 0.87f,
-                ConfirmationCount = 2,
-                LastSeenTime = 12.5f
+                LastAssociatedScore = 0.87f
             };
 
             Assert.AreNotEqual(Guid.Empty, record.SessionId);
@@ -39,8 +37,6 @@ namespace ObjectTagger.Tests.EditMode
             Assert.AreEqual(new Vector3(1f, 2f, 3f), record.WorldPosition);
             Assert.AreEqual(new Vector3(1.1f, 2.1f, 3.1f), record.SmoothedPosition);
             Assert.AreEqual(0.87f, record.LastAssociatedScore);
-            Assert.AreEqual(2, record.ConfirmationCount);
-            Assert.AreEqual(12.5f, record.LastSeenTime);
         }
 
         [Test]

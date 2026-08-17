@@ -66,16 +66,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             public Text Label;
         }
 
-        // Object Tagger slice 5 Task 1: the grace period ceiling.
-        //
-        // The project's behavioural spec caps how long an unseen label may persist at
-        // 3 seconds — a hard acceptance-criterion ceiling, not a preference. Task 2's
-        // re-placement rule and Task 3's formal expiry both need this same number;
-        // defining it once here (instead of two independent copies) is what keeps them
-        // from drifting apart. Private is enough: only sibling code in this file reads
-        // it, and later tasks land in this same file.
-        private const float GracePeriodSeconds = 3f;
-
         // Object Tagger slice 5 Task 2 — the association distance threshold.
         //
         // 0.10m (10cm), set by explicit user ruling on 2026-08-16 during
@@ -108,60 +98,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // the over-merging this value fixes. Re-verify specifically for
         // this at the next on-device check.
         private const float AssociationDistanceMeters = 0.1f;
-
-        // Object Tagger slice 5 Task 3: confirmation count before a label becomes visible.
-        //
-        // Final-review fix (Important #7): the code does NOT implement strict
-        // frame-to-frame consecutiveness. record.ConfirmationCount is incremented on
-        // every ACCEPTED ASSOCIATION and is never reset except by full expiry
-        // (LabelPresentation.IsExpired, gated on GracePeriodSeconds) -- so what this
-        // actually implements is "N accepted detections with no gap longer than the
-        // full grace period", not "N consecutive detections" in the literal sense.
-        // alpha-scope.md's "Label lifecycle" section states: "A label appears after N
-        // consecutive accepted detections associate to the same position, so a single
-        // spurious detection does not produce a visible label." This is a DELIBERATE,
-        // DOCUMENTED DEVIATION from that literal "consecutive" wording, kept rather
-        // than changed: a lossy detector will legitimately miss a frame here and
-        // there, and resetting progress toward confirmation on a single missed frame
-        // would make confirmation less robust for no real benefit -- a genuinely
-        // spurious one-off detection still fails to reach the threshold either way,
-        // since it has no matching re-detections to associate against at all. This
-        // constant defines that threshold.
-        //
-        // LATENCY ARITHMETIC (Task 3 Step 2, spec line 76):
-        // No on-device inference cadence has ever been measured in this project.
-        // The configured cadence lever (m_minSecondsBetweenInferences) defaults to 0
-        // ("uncapped, matches upstream"), so there is no baseline rate. This arithmetic
-        // uses a conservative WORST-CASE ASSUMPTION in the absence of real data.
-        //
-        // ASSUMPTION: Sentis on a mobile CPU backend for a YOLO-based model this size
-        // plausibly runs well under 2 inferences/sec; assuming pessimistic 1 inference/sec
-        // (1s cadence) as a conservative placeholder.
-        //
-        // CHOSEN VALUE: N = 2 confirmations.
-        //
-        // Final-review fix (Minor #8): the arithmetic below previously claimed "the
-        // spawning detection itself counts as the first confirmation" while its own
-        // parenthetical, two sentences later, correctly described the opposite --
-        // directly contradicting itself. Corrected throughout: a newly-spawned label
-        // starts at ConfirmationCount=0, and the spawning detection is NOT
-        // incremented (only subsequent ASSOCIATIONS increment it). Reaching
-        // ConfirmationCount >= 2 therefore requires THREE total detections: the
-        // spawn (detection 1, count stays 0) + the first association (detection 2,
-        // count reaches 1) + the second association (detection 3, count reaches 2,
-        // now visible).
-        //
-        // LATENCY = 2 intervals between those 3 detections × 1s cadence = 2 seconds
-        // from spawn to visible, PLUS up to one more cadence interval (~1s) of wait
-        // before the very first inference resolves the object at all (an object can
-        // enter camera coverage at any point within an inference interval, not
-        // necessarily right as one starts) -- so the worst-case latency from an
-        // object entering coverage to its label appearing is closer to 3 seconds,
-        // not 2. This is still within "a few seconds" (alpha-scope.md), but with
-        // less margin than the previous framing implied. This arithmetic MUST be
-        // reconciled against the REAL logged cadence figure at Task 6's device gate.
-        // Once that number exists, N may need revisiting.
-        private const int ConfirmationsBeforeVisible = 2;
 
         // Object Tagger slice 5 Task 3: position smoothing factor.
         //
@@ -273,6 +209,49 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // ReferenceDistanceMeters too -- a fixed 0.06m world-space push would
         // under-clear a card whose own world-space size has grown 4x by 4m.
         private const float OverlapOffsetMeters = 0.06f;
+
+        // Object Tagger manual-tagging Task 3 — ghost/preview dimming.
+        //
+        // The live candidate's preview reuses the exact same pooled BoxView
+        // prefab as a committed label, distinguished only by reduced opacity
+        // on every Graphic (Text and the anchor-dot Image) found under its
+        // RectTransform, applied once at creation. No new prefab/material is
+        // needed.
+        private const float GhostAlphaMultiplier = 0.5f;
+
+        private static readonly Vector2 FrameCenter = new Vector2(0.5f, 0.5f);
+
+        // Object Tagger manual-tagging Task 3 — the live candidate: whichever
+        // detection's image-space box center is nearest the frame center this
+        // tick, resolved to a world position. Null when nothing qualifies
+        // (no detections, or the nearest-to-center detection's depth probe
+        // missed this tick) — the ghost simply doesn't render that tick, per
+        // the design's "can appear and vanish frame-to-frame" requirement.
+        private readonly struct LiveCandidateState
+        {
+            public readonly int ClassId;
+            public readonly string ClassName;
+            public readonly Vector3 WorldPosition;
+            public readonly float Score;
+
+            public LiveCandidateState(int classId, string className, Vector3 worldPosition, float score)
+            {
+                ClassId = classId;
+                ClassName = className;
+                WorldPosition = worldPosition;
+                Score = score;
+            }
+        }
+
+        private LiveCandidateState? m_liveCandidate;
+
+        /// A single dedicated, never-pooled BoxView for the ghost preview.
+        /// Lazily created on first use. Never passed to ReturnToPool — unlike
+        /// every entry in m_boxViews, this instance is permanent for the
+        /// component's lifetime, so a dimmed ghost view can never leak back
+        /// into m_boxViewPool and be reused (undimmed callers expect) for a
+        /// real committed label.
+        private BoxView m_ghostView;
 
         private readonly List<BoxView> m_boxViews = new();
         private string[] m_labels;
@@ -397,34 +376,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         {
             LogCountsIfDue();
 
-            // Object Tagger slice 5 Task 3: remove boxes that haven't been updated
-            // recently. Task 3 owns expiry logic; Update() applies it here via the
-            // pure-logic IsExpired function. Works for both confirmed (ConfirmationCount
-            // >= ConfirmationsBeforeVisible) and not-yet-confirmed labels — a spurious
-            // detection that never reaches confirmation is still cleaned up once it
-            // stops being re-detected, not lingering forever unconfirmed.
-            //
-            // Deliberately runs BEFORE the per-frame visual pass below, so a view that
-            // is about to be removed this same frame is never redundantly refreshed.
-            for (int i = m_boxViews.Count - 1; i >= 0; i--)
-            {
-                var view = m_boxViews[i];
-                if (LabelPresentation.IsExpired(view.Record.LastSeenTime, Time.time, GracePeriodSeconds))
-                {
-                    ReturnToPool(view);
-                    m_boxViews.RemoveAt(i);
-                }
-            }
-
-            // Object Tagger slice 5 final-review fix — CRITICAL finding: labels did
-            // not actually billboard. See RefreshLabelViews's own comment for the
-            // full explanation; this call is what makes it run every frame instead of
-            // only at inference cadence.
-            //
-            // Nothing to refresh with an empty list — skip the camera-pose query
-            // entirely rather than pay for it (and its DllImport call) every frame
-            // when there are no labels on screen.
-            if (m_boxViews.Count == 0)
+            // Nothing to refresh -- skip the camera-pose query entirely
+            // rather than pay for it (and its DllImport call) every frame
+            // when there is no committed label and no live candidate.
+            if (m_boxViews.Count == 0 && !m_liveCandidate.HasValue)
             {
                 return;
             }
@@ -435,9 +390,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
             // else: the current head pose is not reliable this frame (see
             // TryGetCurrentCameraPose). Every view simply keeps whatever
-            // rotation/scale/position it last had — a stale-by-one-frame render is
-            // an unnoticeable, graceful degradation; computing fresh values from a
-            // garbage near-origin pose would not be.
+            // rotation/scale/position it last had.
         }
 
         // Object Tagger slice 5 final-review fix — mirrors the exact reliability
@@ -489,47 +442,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return true;
         }
 
-        /// Object Tagger slice 5 final-review fix — the CRITICAL finding's fix.
-        ///
-        /// Runs every frame (from Update(), guarded by TryGetCurrentCameraPose)
-        /// over EVERY view in m_boxViews, not just this frame's detections — a
-        /// retained-but-not-redetected label still needs its orientation, scale,
-        /// and position refreshed every frame too, from the CURRENT camera pose.
-        /// Previously all of this lived inside DrawUIBoxes's per-detection loop,
-        /// which only runs at inference cadence (at most ~1Hz, per the placeholder
-        /// assumption elsewhere in this file) — so a label's card stayed frozen at
-        /// whatever the camera pose was at its LAST inference for up to its entire
-        /// grace period, failing alpha-scope.md line 69 ("Labels face the user from
-        /// every approach angle") the moment the camera moved afterward. It also
-        /// meant the minimum-apparent-size scale went stale the same way, and
-        /// ApplyOverlapOffsets could not clear a visual collision caused purely by
-        /// camera movement (no new detection required for that to happen).
-        ///
-        /// Stop Condition 4 (state must not move back into RectTransforms): this
-        /// method only READS from LabelRecord and computes fresh every call — it
-        /// never writes anything back into a LabelRecord field. Same pattern
-        /// ApplyOverlapOffsets already used correctly.
-        ///
-        /// Visibility (SetActive) is included here too, per the final review's
-        /// Minor #10: it doesn't depend on camera pose at all, but making it a
-        /// per-frame invariant enforced by construction (rather than something that
-        /// happens to be correct today only because it is read from state that
-        /// doesn't change between detections) is low risk and keeps every per-view
-        /// visual property in the same one place.
-        ///
-        /// Text content (view.Label.text) deliberately stays in DrawUIBoxes's
-        /// per-detection loop, not here — it only needs to change when a new
-        /// detection is associated; re-setting it every frame would be wasted work
-        /// and was never part of what was broken.
+        // Object Tagger slice 5 final-review fix, simplified by manual-
+        // tagging Task 3 — per-frame billboard/scale pass.
+        //
+        // Runs every frame (from Update(), guarded by TryGetCurrentCameraPose)
+        // over every view in m_boxViews. The SetActive visibility gate from
+        // slice 5 is gone: everything in m_boxViews is, by construction, a
+        // committed label and is always visible from the moment it exists
+        // until TryUntagNearestToCenter or ClearAnnotations removes it.
         private void RefreshLabelViews(Vector3 cameraPosition)
         {
             foreach (var view in m_boxViews)
             {
                 var record = view.Record;
                 var boxRectTransform = view.RectTransform;
-
-                boxRectTransform.gameObject.SetActive(
-                    LabelPresentation.IsVisible(record.ConfirmationCount, ConfirmationsBeforeVisible));
 
                 boxRectTransform.rotation = LabelPresentation.FaceCameraRotation(record.SmoothedPosition, cameraPosition);
 
@@ -538,15 +464,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 boxRectTransform.localScale = Vector3.one * cardScale;
             }
 
-            // Object Tagger slice 5 Task 5 Step 1's ApplyOverlapOffsets already sets
-            // RectTransform.position (assigning SmoothedPosition + any needed offset,
-            // never adding to whatever position was already there) for every
-            // currently-visible view, including its correctly-handled zero-visible
-            // (no-op) and lone-visible (reset to bare SmoothedPosition) cases — see
-            // that method's own comment. Now that it runs every frame with the
-            // CURRENT camera position instead of once per DrawUIBoxes call with the
-            // inference-time one, it is sufficient on its own as the position step;
-            // no separate "set position with no offset" call is needed here.
+            RefreshGhostView(cameraPosition);
+
             ApplyOverlapOffsets(cameraPosition);
         }
 
@@ -599,68 +518,59 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             Debug.Log($"[ObjectTagger] labels parsed: {m_labels.Length} usable of {rawLabels.Length} raw entries.");
         }
 
-        // Object Tagger slice 3 Task 2: signature widened to carry the score.
-        //
-        // SCOPE BOUNDARY — the score stops at the RENDERED VIEW, not at this method.
-        // Slice 5 Task 1 gives LabelRecord a LastAssociatedScore field (spec line 73
-        // assigns per-label score refresh and rendering "<class> — <confidence>%" to
-        // slice 5), but per Task 1 Step 3 the RectTransform view below must not read or
-        // display it — that is Task 4's job. Rendering it early would make this a
-        // rendering change instead of the pure state change Task 1 is meant to be.
+        // Object Tagger slice 3 Task 2, rewritten by manual-tagging Task 3 —
+        // per-detection loop that ONLY associates into already-committed
+        // labels; it never spawns a new one. Spawning happens exclusively at
+        // explicit commit (TryCommitLiveCandidate). This method's other job,
+        // unrelated to commit/associate, is picking this tick's live
+        // candidate (nearest-to-frame-center detection) for ghost preview.
         public void DrawUIBoxes(List<(int classId, Vector4 boundingBox, float score)> detections, Vector2 inputSize, Pose cameraPose)
         {
             if (detections.Count == 0)
             {
                 OnObjectsDetected?.Invoke(0);
+                m_liveCandidate = null;
                 return;
             }
 
             OnObjectsDetected?.Invoke(detections.Count);
             m_detectionsSeen += detections.Count;
 
+            // First pass: image-space rects and normalized centers for every
+            // detection, plus which one is nearest the frame center. Kept
+            // separate from the per-detection work below so NearestSelection
+            // sees every candidate before any of them is processed.
+            var rects = new List<Rect>(detections.Count);
+            var normalizedCenters = new List<Vector2>(detections.Count);
+            var centerDistances = new List<float>(detections.Count);
+            for (var i = 0; i < detections.Count; i++)
+            {
+                var box = detections[i].boundingBox;
+                var rect = new Rect(box.x, box.y, box.z - box.x, box.w - box.y);
+                rects.Add(rect);
+                var normalizedCenter = rect.center / inputSize;
+                normalizedCenters.Add(normalizedCenter);
+                centerDistances.Add(Vector2.Distance(normalizedCenter, FrameCenter));
+            }
+            var liveCandidateDetectionIndex = NearestSelection.IndexOfMinimum(centerDistances);
+
+            LiveCandidateState? newLiveCandidate = null;
+
             // Draw the bounding boxes
             for (var i = 0; i < detections.Count; i++)
             {
                 var detection = detections[i];
-                float x1 = detection.boundingBox[0];
-                float y1 = detection.boundingBox[1];
-                float x2 = detection.boundingBox[2];
-                float y2 = detection.boundingBox[3];
-                Rect rect = new Rect(x1, y1, x2 - x1, y2 - y1);
-                // Rect rect = Rect.MinMaxRect(x1, y1, x2, y2); // todo
-
-                Vector2 normalizedCenter = rect.center / inputSize;
+                Rect rect = rects[i];
+                Vector2 normalizedCenter = normalizedCenters[i];
 
                 // Get the object class name
                 var classname = LabelFor(detection.classId);
 
                 // Get the 3D marker world position using Depth Raycast.
-                //
-                // Slice 4 Task 3: probes m_depthSamplesPerDetection rays around the box
-                // centre and takes the MEDIAN by distance. DEFAULT IS 1, which is exactly
-                // upstream's single centre ray — the mechanism is built but not pulled,
-                // because the plan requires measuring the current offset on device before
-                // changing placement. Raise the sample count only with a baseline to
-                // improve against.
                 var sampleStatus = ProbeDepth(normalizedCenter, cameraPose, out var resolvedPoint);
 
-                // Object Tagger slice 2 Task 5: count attempts, not just failures.
-                // Upstream logs raycast FAILURES and never a total, so no failure RATE is
-                // derivable -- slice 1 recorded 10 absolute failures with no denominator.
-                //
-                // ONE DETECTION IS ONE ATTEMPT regardless of how many rays it took. If
-                // attempts counted rays, moving from 1 to 5 samples would multiply the
-                // denominator fivefold and make the rate incomparable with slice 2's
-                // recorded 0.9%. The rate answers "how often did a DETECTION fail to
-                // resolve", which is the question slice 4's gate asks.
                 m_raycastAttempts++;
 
-                // Slice 4 Task 1 Step 3: the two failure causes are counted SEPARATELY.
-                //
-                // Slice 2 reported 0.9% and that number assumed every miss was a
-                // per-detection miss. Folding subsystem-unavailable frames into the same
-                // counter would inflate the numerator toward 100% and produce a figure
-                // that describes nothing -- "depth is bad" when the truth is "depth is off".
                 if (sampleStatus == DepthResolveStatus.SubsystemUnavailable)
                 {
                     m_depthSubsystemUnavailable++;
@@ -674,14 +584,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 if (!depth.IsHit)
                 {
                     m_raycastMisses++;
-                    // The individual rays now live inside ProbeDepth, so log the box
-                    // centre that generated them instead. More useful anyway: it says
-                    // WHERE on screen the detection failed to resolve, which is what a
-                    // depth-miss investigation actually needs.
-                    //
-                    // classname is mangled (spaces -> underscores) right here, at this
-                    // one log call site, rather than by LabelFor() globally — see
-                    // LabelFor's own comment (Minor #9 fix).
                     Debug.Log($"[ObjectTagger] depth miss for '{classname.Replace(' ', '_')}' at normalizedCenter:{normalizedCenter}, " +
                               $"samples:{m_depthSamplesPerDetection}, cameraPose:{cameraPose}");
                     continue;
@@ -695,236 +597,207 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     rect.height / inputSize.y
                 );
 
-                // Calculate distance and center point first
                 float distance = Vector3.Distance(cameraPose.position, worldPos.Value);
                 var worldSpaceCenter = m_cameraAccess.ViewportPointToRay(normRect.center, cameraPose).GetPoint(distance);
 
-                // Object Tagger slice 5 Task 4 Step 2: the corner-ray reconstruction
-                // that used to live here (intersecting minRay/maxRay against a plane
-                // to derive a Vector2 size for the box's RectTransform) is retired.
-                // It existed solely to size a bounding box, and there is no bounding
-                // box any more (locked decision: a billboarded text card + anchor dot,
-                // no box, no outline). worldSpaceCenter above is unaffected — it comes
-                // from normRect.center, not from the corner rays.
-                //
-                // Object Tagger slice 5 final-review fix: the per-detection facing
-                // direction/rotation that used to be computed here (`normal`, then
-                // Quaternion.LookRotation(normal) below) is gone. It was computed once
-                // at inference time and never touched again, which is the CRITICAL
-                // finding this fix wave exists for — see RefreshLabelViews, which now
-                // computes rotation fresh every frame from the CURRENT camera position.
-
-                var view = GetOrCreateBoxView(detection.classId, worldSpaceCenter, out var wasAssociation);
-
-                // Object Tagger slice 5 Task 1 Step 1: update the RECORD first — this is
-                // the state. WorldPosition is the world-space placement Task 2's matching
-                // will read instead of RectTransform/IoU.
-                //
-                // Object Tagger slice 5 Task 3:
-                // - On spawn (wasAssociation==false): SmoothedPosition starts at
-                //   WorldPosition so smoothing begins at the first observation, not
-                //   from the origin. ConfirmationCount starts at 0 (set in
-                //   GetOrCreateBoxView) and will be incremented here if this spawn
-                //   happens to also be an association (which it isn't, but the logic
-                //   below is uniform).
-                // - On association (wasAssociation==true): ConfirmationCount is
-                //   incremented ONCE per association, so the N-th associated detection
-                //   makes it >= threshold. SmoothedPosition is lerped toward
-                //   WorldPosition to smooth out jitter.
-                // - Visibility is gated on ConfirmationCount >= ConfirmationsBeforeVisible
-                //   by SetActive below.
-                //
-                // SCOPE BOUNDARY: LastAssociatedScore is stored here so it exists for
-                // Task 4, but it must NOT be read by the view below. Slice 3 stopped
-                // the score at this boundary deliberately.
-                var record = view.Record;
-                record.WorldPosition = worldSpaceCenter;
-
-                if (!wasAssociation)
+                // Associate into an existing committed label only -- never
+                // spawn here. A detection that matches nothing is simply not
+                // tracked unless the user commits it.
+                var associatedIndex = FindAssociatedViewIndex(detection.classId, worldSpaceCenter);
+                if (associatedIndex >= 0)
                 {
-                    // New spawn: initialize SmoothedPosition at the first observation.
-                    record.SmoothedPosition = worldSpaceCenter;
-                }
-                else
-                {
-                    // Associated re-detection: smooth toward the new position.
-                    record.SmoothedPosition = LabelPresentation.Smooth(
-                        record.SmoothedPosition, worldSpaceCenter, SmoothingFactor);
-
-                    // Increment confirmation count on each associated detection.
-                    record.ConfirmationCount++;
+                    var view = m_boxViews[associatedIndex];
+                    var record = view.Record;
+                    record.WorldPosition = worldSpaceCenter;
+                    record.SmoothedPosition = LabelPresentation.Smooth(record.SmoothedPosition, worldSpaceCenter, SmoothingFactor);
+                    record.LastAssociatedScore = detection.score;
+                    view.Label.text = $"{record.ClassName} — {Mathf.RoundToInt(record.LastAssociatedScore * 100)}%";
                 }
 
-                record.LastAssociatedScore = detection.score;
-                record.LastSeenTime = Time.time;
-
-                // Object Tagger slice 5 Task 4 Step 1: "<class> — <confidence>%",
-                // rounded, from the RECORD's LastAssociatedScore (last accepted
-                // detection's score, unsmoothed — smoothing applies to position
-                // only, per the locked decision). This is the first time confidence
-                // reaches the screen; slices 3-4 deliberately carried it without
-                // rendering it. Score is a 0-1 probability (m_scoreThreshold is
-                // [Range(0,1)], defaulted to 0.23/0.3 across this project's
-                // configs), so *100 rounded is a percentage, not double-scaling an
-                // already-scaled value. Reads record.ClassName directly (final-review
-                // fix, Minor #9: it is now the raw unmangled name, not a
-                // spaces-to-underscores mangled value that needed reversing for
-                // display — see LabelFor's comment) so the view stays a projection of
-                // the record, not of loop-local state.
-                //
-                // Text content only needs to change when a new detection is
-                // associated — this is the only per-detection-loop write to the view
-                // left after the final-review fix moved rotation/scale/visibility/
-                // position into the per-frame RefreshLabelViews pass (see Update()).
-                view.Label.text = $"{record.ClassName} — {Mathf.RoundToInt(record.LastAssociatedScore * 100)}%";
+                if (i == liveCandidateDetectionIndex)
+                {
+                    var smoothedGhostPosition = m_liveCandidate.HasValue
+                        ? LabelPresentation.Smooth(m_liveCandidate.Value.WorldPosition, worldSpaceCenter, SmoothingFactor)
+                        : worldSpaceCenter;
+                    newLiveCandidate = new LiveCandidateState(detection.classId, classname, smoothedGhostPosition, detection.score);
+                }
             }
+
+            m_liveCandidate = newLiveCandidate;
         }
 
-        /// Object Tagger slice 5 Task 5 Step 1: applies LabelOverlap's pairwise
-        /// vertical-offset resolution to every currently-VISIBLE view's rendered
-        /// position.
-        ///
-        /// Object Tagger slice 5 final-review fix: called from RefreshLabelViews
-        /// (Update()'s per-frame visual pass) with the CURRENT camera position now,
-        /// rather than once per DrawUIBoxes call with the inference-time one. The
-        /// logic below is unchanged -- only WHEN it runs and WHICH camera position
-        /// it is given changed. This is also why the "reads state fresh, assigns
-        /// rather than adds" discipline described below matters even more now: it
-        /// runs far more often (every frame, not once per inference).
-        ///
-        /// Deliberately reads LabelRecord.SmoothedPosition (the state) as the
-        /// base position for every view, and ASSIGNS (not adds) the result to
-        /// the RectTransform -- never reads the RectTransform's own current
-        /// position and never writes the offset back into the record. Reading
-        /// the RectTransform's position would make the offset accumulate frame
-        /// over frame for a view that stays visible-but-undetected across
-        /// several calls (see LabelOverlap.ComputeVerticalOffsets's
-        /// comment for why that is a real bug, not a theoretical one), and
-        /// writing the offset into the record would violate Stop Condition 4 by
-        /// the same principle that RectTransform state must not move back into
-        /// LabelRecord -- this is the mirror case: view-only adjustments must
-        /// not leak back into the record either.
-        ///
-        /// Invisible (unconfirmed) labels are excluded: LabelPresentation.IsVisible
-        /// gates whether a view is even rendered, so an invisible label cannot
-        /// visually collide with anything.
-        ///
-        /// KNOWN CONSEQUENCE: offsetting boxRectTransform's position also moves
-        /// the anchor dot, which is a CHILD of boxRectTransform at local
-        /// anchoredPosition (0,0) (see BoxView's comment: the dot "tracks
-        /// SmoothedPosition exactly"). An offset card's dot therefore no longer
-        /// sits on the real-world object -- it moves with the card. This is the
-        /// direct, intended consequence of the locked decision (offset the
-        /// RENDERED position); splitting the dot from the card to keep it
-        /// anchored to the true position while the text moves would need a
-        /// prefab hierarchy change, which is out of this task's scope. Flagged
-        /// here so Task 6's device gate knows to look at it.
+        // Object Tagger slice 5 Task 5 Step 1, simplified by manual-tagging
+        // Task 3 — applies LabelOverlap's pairwise vertical-offset resolution
+        // to every committed view's rendered position.
+        //
+        // No separate visibleViews filter is needed any more: m_boxViews IS
+        // the visible set now that the confirmation gate is gone.
         private void ApplyOverlapOffsets(Vector3 cameraPosition)
         {
-            var visibleViews = new List<BoxView>(m_boxViews.Count);
-            foreach (var view in m_boxViews)
+            if (m_boxViews.Count == 0)
             {
-                if (LabelPresentation.IsVisible(view.Record.ConfirmationCount, ConfirmationsBeforeVisible))
-                {
-                    visibleViews.Add(view);
-                }
-            }
-
-            if (visibleViews.Count == 0)
-            {
-                // Nothing to reset. Deliberately NOT short-circuiting on
-                // Count == 1 as well: a lone visible view still needs to run
-                // through the snapshot-and-assign below so a PREVIOUSLY
-                // applied offset gets cleared once its overlap partner is no
-                // longer around to justify it (e.g. the nearer of a pair
-                // expired since the last frame this pass ran, or wasn't
-                // re-detected this frame). With one view, ComputeVerticalOffsets
-                // always returns [0], so the assignment below resets that
-                // view's RectTransform.position back to its bare
-                // SmoothedPosition -- the reset IS the point, not wasted work.
-                // Skipping it here would leave a stale 6cm offset baked into
-                // the RectTransform with nothing left to clear it, breaking
-                // the "always derived fresh from the record" invariant this
-                // whole method exists to uphold.
                 return;
             }
 
-            var basePositions = new Vector3[visibleViews.Count];
-            for (var i = 0; i < visibleViews.Count; i++)
+            var basePositions = new Vector3[m_boxViews.Count];
+            for (var i = 0; i < m_boxViews.Count; i++)
             {
-                basePositions[i] = visibleViews[i].Record.SmoothedPosition;
+                basePositions[i] = m_boxViews[i].Record.SmoothedPosition;
             }
 
             var offsets = LabelOverlap.ComputeVerticalOffsets(
                 cameraPosition, basePositions, OverlapAngleThresholdDegrees, OverlapOffsetMeters,
                 BaseCardScale, ReferenceDistanceMeters);
 
-            for (var i = 0; i < visibleViews.Count; i++)
+            for (var i = 0; i < m_boxViews.Count; i++)
             {
-                visibleViews[i].RectTransform.position = basePositions[i] + Vector3.up * offsets[i];
+                m_boxViews[i].RectTransform.position = basePositions[i] + Vector3.up * offsets[i];
             }
         }
 
-        // Object Tagger slice 5 Task 2: class+world-distance matching over
-        // LabelRecord.WorldPosition, replacing Task 1's IoU/RectTransform box-extent
-        // matching. The decision itself is pure logic in LabelAssociation.Decide —
-        // this method's job is just to snapshot m_boxViews into that function's
-        // input shape and act on the Decision it returns.
+        // Object Tagger manual-tagging Task 3 — the association-only lookup.
         //
-        // Object Tagger slice 5 Task 3: returns wasAssociation to distinguish spawns
-        // from re-detections. Task 3 uses this to increment ConfirmationCount only on
-        // associations (not on the spawn itself), keeping all record mutation in
-        // DrawUIBoxes alongside the other field updates.
-        private BoxView GetOrCreateBoxView(int classId, Vector3 worldSpaceCenter, out bool wasAssociation)
+        // Snapshots m_boxViews into LabelAssociation's input shape and
+        // returns the matching index or -1. Used both by the passive
+        // per-detection loop (DrawUIBoxes, associate-only, never spawns) and
+        // by TryCommitLiveCandidate (associate-or-spawn: spawns itself when
+        // this returns -1).
+        private int FindAssociatedViewIndex(int classId, Vector3 worldPosition)
         {
             var existing = new LabelAssociation.Existing[m_boxViews.Count];
             for (var i = 0; i < m_boxViews.Count; i++)
             {
                 var record = m_boxViews[i].Record;
-                existing[i] = new LabelAssociation.Existing(record.ClassId, record.WorldPosition, record.LastSeenTime);
+                existing[i] = new LabelAssociation.Existing(record.ClassId, record.WorldPosition);
             }
 
-            var decision = LabelAssociation.Decide(
-                existing, classId, worldSpaceCenter, Time.time, AssociationDistanceMeters, GracePeriodSeconds);
+            return LabelAssociation.FindAssociationIndex(existing, classId, worldPosition, AssociationDistanceMeters);
+        }
 
-            // Decision.AssociatedIndex/RemoveIndex are mutually exclusive (see
-            // LabelAssociation.Decide), so removing here never invalidates an
-            // AssociatedIndex we're about to use below.
-            if (decision.RemoveIndex >= 0)
+        // Object Tagger manual-tagging Task 3 — A-button/pinch commit.
+        //
+        // Promotes the current live candidate into a persisted, immediately
+        // visible label. Associate-or-spawn: if the candidate is already
+        // within AssociationDistanceMeters of an existing committed label of
+        // the same class, this re-affirms that label (updates its position/
+        // score) instead of creating a duplicate. Returns false if there is
+        // no live candidate to commit (e.g. nothing detected this tick).
+        internal bool TryCommitLiveCandidate()
+        {
+            if (!m_liveCandidate.HasValue)
             {
-                // Object Tagger slice 5 Task 2 Step 3 (alpha-scope.md re-placement
-                // rule): this same-class label is now farther than the association
-                // threshold but still inside its grace period. Left alone it would
-                // linger up to GracePeriodSeconds after the object it tracked has
-                // already moved elsewhere and spawned a new label there — briefly
-                // showing two labels for one object. Removing it immediately here
-                // is what the spec asks for instead of waiting on Update()'s expiry.
-                var staleView = m_boxViews[decision.RemoveIndex];
-                ReturnToPool(staleView);
-                m_boxViews.RemoveAt(decision.RemoveIndex);
+                return false;
             }
 
-            if (decision.AssociatedIndex >= 0)
+            var candidate = m_liveCandidate.Value;
+            var existingIndex = FindAssociatedViewIndex(candidate.ClassId, candidate.WorldPosition);
+
+            BoxView view;
+            if (existingIndex >= 0)
             {
-                wasAssociation = true;
-                return m_boxViews[decision.AssociatedIndex];
+                view = m_boxViews[existingIndex];
+                view.Record.SmoothedPosition = LabelPresentation.Smooth(view.Record.SmoothedPosition, candidate.WorldPosition, SmoothingFactor);
+            }
+            else
+            {
+                view = GetViewFromPoolOrCreate();
+                view.Record.SessionId = Guid.NewGuid();
+                view.Record.ClassId = candidate.ClassId;
+                view.Record.ClassName = candidate.ClassName;
+                view.Record.SmoothedPosition = candidate.WorldPosition;
+                m_boxViews.Add(view);
+                view.RectTransform.gameObject.SetActive(true);
             }
 
-            // Object Tagger slice 5 Task 2: different-class overlap in space is
-            // deliberately NOT handled here — the locked decision is that both
-            // labels stay visible and the farther one gets a visual offset, which
-            // is Task 5's job. This method never inspects, evicts, or otherwise
-            // touches any other-class BoxView.
+            view.Record.WorldPosition = candidate.WorldPosition;
+            view.Record.LastAssociatedScore = candidate.Score;
+            view.Label.text = $"{view.Record.ClassName} — {Mathf.RoundToInt(view.Record.LastAssociatedScore * 100)}%";
+            return true;
+        }
 
-            // Create a new box, backed by a fresh LabelRecord with its own session id.
-            var newView = GetViewFromPoolOrCreate();
-            newView.Record.SessionId = Guid.NewGuid();
-            newView.Record.ClassId = classId;
-            newView.Record.ClassName = LabelFor(classId);
-            newView.Record.ConfirmationCount = 0;
-            m_boxViews.Add(newView);
-            wasAssociation = false;
-            return newView;
+        // Object Tagger manual-tagging Task 3 — B-button/pinch short-press
+        // targeted untag.
+        //
+        // Removes the single committed label nearest the center of view.
+        // "Nearest to center of view" is measured the same way as the live
+        // candidate's targeting conceptually, but in camera-angle space
+        // (committed labels only have a world position, not an image-space
+        // box) via the existing LabelOverlap.AngularSeparationDegrees,
+        // comparing each label's direction from the camera against the
+        // camera's own forward direction. Returns false if there is nothing
+        // to untag or the current camera pose is not reliable this tick.
+        internal bool TryUntagNearestToCenter()
+        {
+            if (m_boxViews.Count == 0 || !TryGetCurrentCameraPose(out var cameraPose))
+            {
+                return false;
+            }
+
+            var cameraForward = cameraPose.rotation * Vector3.forward;
+            var angularSeparations = new List<float>(m_boxViews.Count);
+            foreach (var view in m_boxViews)
+            {
+                angularSeparations.Add(LabelOverlap.AngularSeparationDegrees(
+                    cameraPose.position, cameraPose.position + cameraForward, view.Record.SmoothedPosition));
+            }
+
+            var nearestIndex = NearestSelection.IndexOfMinimum(angularSeparations);
+            ReturnToPool(m_boxViews[nearestIndex]);
+            m_boxViews.RemoveAt(nearestIndex);
+            return true;
+        }
+
+        // Object Tagger manual-tagging Task 3 — the ghost/preview view.
+        //
+        // Reuses GetViewFromPoolOrCreate's exact instantiation path, then
+        // dims every Graphic under its RectTransform (Text and the anchor-
+        // dot Image) once, at creation, rather than reduce-opacity-per-frame
+        // work. The view's LabelRecord is allocated but never used -- the
+        // ghost reads from m_liveCandidate, not a LabelRecord -- an accepted
+        // minor waste rather than introducing a second, near-duplicate view
+        // type just to omit one unused field.
+        private BoxView CreateGhostView()
+        {
+            var view = GetViewFromPoolOrCreate();
+            foreach (var graphic in view.RectTransform.GetComponentsInChildren<Graphic>(true))
+            {
+                var color = graphic.color;
+                color.a *= GhostAlphaMultiplier;
+                graphic.color = color;
+            }
+            view.RectTransform.gameObject.SetActive(false);
+            return view;
+        }
+
+        // Object Tagger manual-tagging Task 3 — per-frame ghost refresh.
+        //
+        // Mirrors the per-view work in RefreshLabelViews (billboard, scale)
+        // for the single ghost view, driven by m_liveCandidate instead of a
+        // LabelRecord. Does not participate in ApplyOverlapOffsets -- the
+        // ghost may visually overlap a committed label; accepted
+        // simplification, flagged for the device gate (Task 6) to observe,
+        // not a blocking requirement.
+        private void RefreshGhostView(Vector3 cameraPosition)
+        {
+            if (m_ghostView == null)
+            {
+                m_ghostView = CreateGhostView();
+            }
+
+            if (!m_liveCandidate.HasValue)
+            {
+                m_ghostView.RectTransform.gameObject.SetActive(false);
+                return;
+            }
+
+            var candidate = m_liveCandidate.Value;
+            m_ghostView.RectTransform.gameObject.SetActive(true);
+            m_ghostView.Label.text = $"{candidate.ClassName} — {Mathf.RoundToInt(candidate.Score * 100)}%";
+            m_ghostView.RectTransform.rotation = LabelPresentation.FaceCameraRotation(candidate.WorldPosition, cameraPosition);
+            var cardDistance = Vector3.Distance(cameraPosition, candidate.WorldPosition);
+            var cardScale = LabelPresentation.ComputeCardScale(cardDistance, BaseCardScale, ReferenceDistanceMeters);
+            m_ghostView.RectTransform.localScale = Vector3.one * cardScale;
+            m_ghostView.RectTransform.position = candidate.WorldPosition;
         }
 
         private BoxView GetViewFromPoolOrCreate()
