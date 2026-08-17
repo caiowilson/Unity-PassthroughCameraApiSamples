@@ -16,7 +16,7 @@ namespace ObjectTagger.Tests.EditMode
 {
     public class LabelAssociationTests
     {
-        private const float Threshold = 0.3f;
+        private const float Threshold = 2.00f;
         private const float GracePeriod = 3f;
 
         private static List<LabelAssociation.Existing> One(int classId, Vector3 pos, float lastSeenTime) =>
@@ -38,11 +38,11 @@ namespace ObjectTagger.Tests.EditMode
         [Test]
         public void SameClassButFarSpawnsNewAndReapsTheStaleOne()
         {
-            // 2m away — far outside the threshold — but still inside the 3s grace
+            // 10m away — far outside the threshold — but still inside the 3s grace
             // period (only 0.5s old). This is the moved-object case Step 3 targets:
             // exactly one same-class candidate, so it is unambiguous.
             var existing = One(classId: 5, pos: new Vector3(0f, 0f, 0f), lastSeenTime: 1.0f);
-            var newPos = new Vector3(2f, 0f, 0f);
+            var newPos = new Vector3(10f, 0f, 0f);
 
             var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 1.5f, Threshold, GracePeriod);
 
@@ -55,8 +55,9 @@ namespace ObjectTagger.Tests.EditMode
         {
             // Already past the grace period -> Update()'s own expiry loop would
             // already have reaped this; the re-placement rule must not double-fire.
+            // 10m away — far outside the threshold, unambiguously.
             var existing = One(classId: 5, pos: new Vector3(0f, 0f, 0f), lastSeenTime: 0f);
-            var newPos = new Vector3(2f, 0f, 0f);
+            var newPos = new Vector3(10f, 0f, 0f);
 
             var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 5f, Threshold, GracePeriod);
 
@@ -68,7 +69,7 @@ namespace ObjectTagger.Tests.EditMode
         public void SameFrameSameClassFarCandidateIsNotReaped()
         {
             // Two SEPARATE same-class objects visible in the SAME frame, e.g. two
-            // chairs 2m apart. DrawUIBoxes stamps LastSeenTime with the same
+            // chairs 10m apart. DrawUIBoxes stamps LastSeenTime with the same
             // Time.time for every detection processed this frame, so the first
             // one placed (R1) has age == 0 relative to the second detection (B)
             // being decided right now. R1 must NOT read as "the previous label of
@@ -78,7 +79,7 @@ namespace ObjectTagger.Tests.EditMode
             // collapsing every simultaneously-visible instance of a class to one
             // per frame.
             var existing = One(classId: 5, pos: new Vector3(0f, 0f, 0f), lastSeenTime: 10f);
-            var newPos = new Vector3(2f, 0f, 0f);
+            var newPos = new Vector3(10f, 0f, 0f);
 
             var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 10f, Threshold, GracePeriod);
 

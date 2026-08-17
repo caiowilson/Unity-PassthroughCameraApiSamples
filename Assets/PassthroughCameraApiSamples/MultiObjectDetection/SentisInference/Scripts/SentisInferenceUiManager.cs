@@ -78,26 +78,27 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger slice 5 Task 2 — the association distance threshold.
         //
-        // The acceptance procedure places objects 1.5-2.5m from the camera; the
-        // plan calls for a threshold "in the tens of centimetres". 0.3m is chosen
-        // as the balance point: too large (e.g. 0.5m+) risks merging two
-        // neighbouring same-class objects into one label — a pair of chairs at a
-        // table is commonly closer together than that. Too small spawns
-        // duplicate labels for the SAME object as the depth/position estimate
-        // jitters frame to frame — slice 4's validation record
-        // (docs/validation/2026-08-15-slice-4-spatial-placement.md) settled on
-        // "AIMS CORRECTLY and JITTERS BADLY": mean accuracy ~2cm, individual
-        // placements scatter +/-13cm (its "decisive measurement", corrected
-        // result). 0.3m clears that with margin. One disputed, permanently-
-        // unresolved reading in the same record (the mouse-precision conflict,
-        // D-slice4-2) puts one class's scatter at 27.5cm on 6 samples — the
-        // record itself says the raw data to settle which figure is right no
-        // longer exists. 0.3m does NOT clear that disputed figure. Chosen
-        // anyway because it is disputed rather than confirmed, and because a
-        // threshold large enough to clear 27.5cm (e.g. 0.5m+) reopens the
-        // same-class-merging risk above. Revisit if a future device run
-        // reproduces scatter near that magnitude for a tracked class.
-        private const float AssociationDistanceMeters = 0.3f;
+        // 2.00m. This is a direct, explicit user ruling, given twice, not a value
+        // derived from engineering analysis of slice 4's scatter data. The plan's
+        // guidance was a threshold "in the tens of centimetres"; an earlier,
+        // incomplete SDD ledger already recorded the user overriding that guidance
+        // to 2.00m after being shown the conflict, but that ledger entry was never
+        // acted on — Task 2 was first implemented at 0.3m by an implementer who
+        // reasoned independently from slice 4's numbers without ever seeing the
+        // ruling. This reopening corrects that miss and restores the user's
+        // explicit value.
+        //
+        // Known consequence, already flagged in that ledger and not yet
+        // contradicted by evidence: the acceptance room places same-class objects
+        // (e.g. two chairs) within 2m of each other routinely, so a 2.00m
+        // threshold will associate them into ONE label instead of two. This is
+        // the opposite failure mode from the 0.3m value it replaces, which was
+        // chosen specifically to avoid it. Task 6's gate step — "two simultaneous
+        // labels, individually legible" — is the empirical test that will surface
+        // this if it turns out to be wrong in practice. Do not shrink this value
+        // to pass that gate without going back to the user first: it is
+        // authority, not oversight.
+        private const float AssociationDistanceMeters = 2.00f;
 
         // Object Tagger slice 5 Task 3: confirmation count before a label becomes visible.
         //
