@@ -79,5 +79,24 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         {
             return baseScale * Mathf.Max(1f, distance / referenceDistance);
         }
+
+        // Object Tagger slice 5 final-review fix — CRITICAL finding: labels did not
+        // actually billboard. Rotation was previously computed once per inference
+        // inside DrawUIBoxes (at most ~1Hz, per the placeholder cadence assumption)
+        // and never touched again, so a retained-but-not-redetected label stayed
+        // frozen at its last inference-time orientation for up to the full 3-second
+        // grace period -- failing alpha-scope.md line 69 ("Labels face the user from
+        // every approach angle") the moment the camera moved after that inference.
+        //
+        // This function is called every frame (SentisInferenceUiManager.Update()'s
+        // per-frame visual pass), from the CURRENT camera position, not the stale
+        // inference-time one -- that is the entire fix. Pulled out as a pure
+        // function, same reasoning as ComputeCardScale: reachable from edit-mode
+        // tests with no RectTransform/GameObject/MonoBehaviour involved.
+        public static Quaternion FaceCameraRotation(Vector3 labelPosition, Vector3 cameraPosition)
+        {
+            var facingDirection = (labelPosition - cameraPosition).normalized;
+            return Quaternion.LookRotation(facingDirection);
+        }
     }
 }

@@ -59,9 +59,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 if (InputManager.IsButtonADownOrPinchStarted())
                 {
                     // Object Tagger slice 5 Task 1: SpawnCurrentDetectedObjects() is
-                    // deleted (below) along with the rest of the confirmed-dead marker
-                    // feature. This branch is left as a no-op rather than removed —
-                    // see the method comment above.
+                    // deleted (below) along with the rest of the marker-spawn feature.
+                    // Final-review fix (Important #5): the deletion was originally
+                    // justified as removing "confirmed dead" code; the project's
+                    // validation record (docs/validation/2026-08-15-slice-5-labels.md,
+                    // D-slice5-1) later found that claim was FALSE — the feature was
+                    // very likely live in the running app. The deletion itself stands
+                    // regardless: the design spec
+                    // (docs/superpowers/specs/2026-08-14-object-tagger-alpha-design.md,
+                    // line 57) explicitly states "the sample's marker interaction which
+                    // is not adopted", which is independent, spec-level authority to
+                    // remove it whether or not it was live. This branch is left as a
+                    // no-op rather than removed — see the method comment above.
                 }
             }
 
@@ -193,10 +202,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger slice 5 Task 1: the marker-destroy loop, m_spawnedEntities
         // clear, and OnObjectsIdentified invocation are deleted along with the rest of
-        // the now-confirmed-dead "spawn 3D marker" feature (SpawnCurrentDetectedObjects
-        // and HasExistingMarkerInBoundingBox, both removed). CleanMarkers() itself is
-        // kept: EraseSpatialAnchor() (spatial-anchor lifecycle, out of scope for this
-        // task) still calls it.
+        // the "spawn 3D marker" feature (SpawnCurrentDetectedObjects and
+        // HasExistingMarkerInBoundingBox, both removed). Final-review fix (Important
+        // #5): removed on the design spec's non-adoption clause
+        // (docs/superpowers/specs/2026-08-14-object-tagger-alpha-design.md, line 57:
+        // "the sample's marker interaction which is not adopted"), not because the
+        // feature was dead code — the project's validation record
+        // (docs/validation/2026-08-15-slice-5-labels.md, D-slice5-1) found it was
+        // very likely live in the running app before this deletion. CleanMarkers()
+        // itself is kept: EraseSpatialAnchor() (spatial-anchor lifecycle, out of
+        // scope for this task) still calls it.
         private void CleanMarkers()
         {
             LogSpatialAnchor("CleanMarkers");

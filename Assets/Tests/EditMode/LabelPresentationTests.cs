@@ -266,5 +266,67 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.AreEqual(1f, scale, 1e-5f, "baseScale must scale the whole result, not just the clamp floor");
         }
+
+        // ===== FaceCameraRotation Tests (final-review fix — CRITICAL finding) =====
+        //
+        // These pin the fix for the finding that labels did not actually billboard:
+        // rotation must be computed fresh from the CURRENT camera position every
+        // call, not cached from wherever the camera was at inference time.
+
+        [Test]
+        public void FaceCameraRotationFacesCameraFromInFront()
+        {
+            // Label sits 5m down +Z from the camera at the origin. The rotation's
+            // forward axis must point from camera toward label, i.e. +Z.
+            var labelPosition = new Vector3(0f, 0f, 5f);
+            var cameraPosition = Vector3.zero;
+
+            var rotation = LabelPresentation.FaceCameraRotation(labelPosition, cameraPosition);
+            var forward = rotation * Vector3.forward;
+
+            Assert.Less(Vector3.Distance(forward, Vector3.forward), 1e-4f,
+                "rotation's forward axis must point from the camera toward the label");
+        }
+
+        [Test]
+        public void FaceCameraRotationFollowsAMovedCameraNotAStaleOne()
+        {
+            // This is the direct regression test for the billboard bug: the SAME
+            // label position must produce a DIFFERENT rotation once the camera has
+            // moved, proving rotation is recomputed from the current camera position
+            // rather than frozen at some earlier (stale) one.
+            var labelPosition = new Vector3(0f, 0f, 5f);
+            var cameraPositionBefore = Vector3.zero;
+            var cameraPositionAfter = new Vector3(5f, 0f, 5f);
+
+            var rotationBefore = LabelPresentation.FaceCameraRotation(labelPosition, cameraPositionBefore);
+            var rotationAfter = LabelPresentation.FaceCameraRotation(labelPosition, cameraPositionAfter);
+
+            Assert.Greater(Quaternion.Angle(rotationBefore, rotationAfter), 1f,
+                "rotation must change once the camera moves, not stay frozen at its old value");
+
+            // And it must face the NEW camera position specifically, not just any
+            // different direction.
+            var forwardAfter = rotationAfter * Vector3.forward;
+            var expectedDirection = (labelPosition - cameraPositionAfter).normalized;
+            Assert.Less(Vector3.Distance(forwardAfter, expectedDirection), 1e-4f,
+                "after the camera moves, rotation must face the label from the NEW camera position");
+        }
+
+        [Test]
+        public void FaceCameraRotationFacesCameraFromTheSide()
+        {
+            // Camera off to the side of the label — sanity check the formula isn't
+            // accidentally axis-locked to a single approach direction.
+            var labelPosition = new Vector3(0f, 0f, 0f);
+            var cameraPosition = new Vector3(3f, 0f, 0f);
+
+            var rotation = LabelPresentation.FaceCameraRotation(labelPosition, cameraPosition);
+            var forward = rotation * Vector3.forward;
+            var expectedDirection = new Vector3(-1f, 0f, 0f);
+
+            Assert.Less(Vector3.Distance(forward, expectedDirection), 1e-4f,
+                "rotation must face toward the label from wherever the camera actually is");
+        }
     }
 }

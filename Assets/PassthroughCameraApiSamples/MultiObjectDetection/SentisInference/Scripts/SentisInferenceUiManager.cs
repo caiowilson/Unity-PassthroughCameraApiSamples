@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using Meta.XR;
 using Meta.XR.Samples;
 using UnityEngine;
@@ -29,9 +30,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger slice 5 Task 1: pairs a LabelRecord (state) with the
         // RectTransform that currently renders it. The RectTransform is a VIEW driven
-        // FROM the record every frame in DrawUIBoxes — the record is never derived
-        // from it. Task 4 retires this view; until then it is the only consumer of
-        // LabelRecord's WorldPosition.
+        // FROM the record — the record is never derived from it. Final-review fix:
+        // that projection now happens every FRAME (RefreshLabelViews, called from
+        // Update()), not once per DrawUIBoxes call at inference cadence — see
+        // RefreshLabelViews's comment for why that distinction was the whole point
+        // of this fix wave. Task 4 retires this view; until then it is the only
+        // consumer of LabelRecord's WorldPosition.
         //
         // Deliberately a private pairing wrapper rather than a public List<LabelRecord>
         // plus a parallel List<RectTransform>: two lists kept in sync by index drift
@@ -97,9 +101,22 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger slice 5 Task 3: confirmation count before a label becomes visible.
         //
-        // A label appears only after N CONSECUTIVE accepted detections associate to
-        // the same position, so a single spurious detection does not produce a visible
-        // label. This constant defines that threshold.
+        // Final-review fix (Important #7): the code does NOT implement strict
+        // frame-to-frame consecutiveness. record.ConfirmationCount is incremented on
+        // every ACCEPTED ASSOCIATION and is never reset except by full expiry
+        // (LabelPresentation.IsExpired, gated on GracePeriodSeconds) -- so what this
+        // actually implements is "N accepted detections with no gap longer than the
+        // full grace period", not "N consecutive detections" in the literal sense.
+        // alpha-scope.md's "Label lifecycle" section states: "A label appears after N
+        // consecutive accepted detections associate to the same position, so a single
+        // spurious detection does not produce a visible label." This is a DELIBERATE,
+        // DOCUMENTED DEVIATION from that literal "consecutive" wording, kept rather
+        // than changed: a lossy detector will legitimately miss a frame here and
+        // there, and resetting progress toward confirmation on a single missed frame
+        // would make confirmation less robust for no real benefit -- a genuinely
+        // spurious one-off detection still fails to reach the threshold either way,
+        // since it has no matching re-detections to associate against at all. This
+        // constant defines that threshold.
         //
         // LATENCY ARITHMETIC (Task 3 Step 2, spec line 76):
         // No on-device inference cadence has ever been measured in this project.
@@ -113,26 +130,63 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         //
         // CHOSEN VALUE: N = 2 confirmations.
         //
-        // LATENCY = 2 confirmations × 1s cadence = 2 seconds for a label to appear.
-        // (Note: a newly-spawned label starts at ConfirmationCount=0 and requires
-        // ConfirmationCount >= 2 to be visible, so the spawning detection itself
-        // counts as the first confirmation. Total observations before visibility:
-        // first detection (spawn, count=0) + 1 more association (count reaches 1),
-        // then on the 2nd associated detection it reaches count=2 and becomes visible.)
+        // Final-review fix (Minor #8): the arithmetic below previously claimed "the
+        // spawning detection itself counts as the first confirmation" while its own
+        // parenthetical, two sentences later, correctly described the opposite --
+        // directly contradicting itself. Corrected throughout: a newly-spawned label
+        // starts at ConfirmationCount=0, and the spawning detection is NOT
+        // incremented (only subsequent ASSOCIATIONS increment it). Reaching
+        // ConfirmationCount >= 2 therefore requires THREE total detections: the
+        // spawn (detection 1, count stays 0) + the first association (detection 2,
+        // count reaches 1) + the second association (detection 3, count reaches 2,
+        // now visible).
         //
-        // 2 seconds is comfortably within "a few seconds" (alpha-scope.md). This
-        // arithmetic MUST be reconciled against the REAL logged cadence figure at
-        // Task 6's device gate. Once that number exists, N may need revisiting.
+        // LATENCY = 2 intervals between those 3 detections × 1s cadence = 2 seconds
+        // from spawn to visible, PLUS up to one more cadence interval (~1s) of wait
+        // before the very first inference resolves the object at all (an object can
+        // enter camera coverage at any point within an inference interval, not
+        // necessarily right as one starts) -- so the worst-case latency from an
+        // object entering coverage to its label appearing is closer to 3 seconds,
+        // not 2. This is still within "a few seconds" (alpha-scope.md), but with
+        // less margin than the previous framing implied. This arithmetic MUST be
+        // reconciled against the REAL logged cadence figure at Task 6's device gate.
+        // Once that number exists, N may need revisiting.
         private const int ConfirmationsBeforeVisible = 2;
 
         // Object Tagger slice 5 Task 3: position smoothing factor.
         //
-        // Smoothing uses exponential (lerp-based) blending: each frame,
-        // SmoothedPosition = Lerp(SmoothedPosition, WorldPosition, SmoothingFactor).
-        // Factor should be in (0, 1): smaller values (e.g. 0.1) smooth more heavily,
-        // larger values (e.g. 0.3) respond faster. With Lerp, factor in (0,1) cannot
-        // overshoot or oscillate. 0.2 is a middle ground: responsive but still smooth.
-        private const float SmoothingFactor = 0.2f;
+        // Final-review fix (Important #2): the comment previously said "each frame,
+        // SmoothedPosition = Lerp(...)". That was wrong about WHEN smoothing runs:
+        // LabelPresentation.Smooth is called once per ACCEPTED ASSOCIATION (i.e. once
+        // per DrawUIBoxes call that re-detects this label), which happens at inference
+        // cadence -- the same placeholder ~1 inference/sec worst-case assumption
+        // ConfirmationsBeforeVisible's comment uses -- not at frame rate (which can be
+        // tens of times faster). Corrected: SmoothedPosition = Lerp(SmoothedPosition,
+        // WorldPosition, SmoothingFactor) is applied once per accepted association.
+        //
+        // Factor should be in (0, 1): smaller values smooth more heavily, larger
+        // values respond faster. With Lerp, factor in (0,1) cannot overshoot or
+        // oscillate.
+        //
+        // VALUE RAISED FROM 0.2 TO 0.5 as part of this same fix. At the assumed 1Hz
+        // worst-case cadence, 0.2 takes 1-(0.8)^n to close n iterations' worth of a
+        // position error: ~7 iterations (~7 seconds of continuous re-detection) to
+        // close 80% of it -- well past the point a label is even required to be
+        // visible or retained, per slice 4's validation record
+        // (docs/validation/2026-08-15-slice-4-spatial-placement.md), which measured
+        // real frame-to-frame position jitter of +/-13cm (its decisive corrected
+        // reading; one disputed, unresolved reading in the same record puts one
+        // class as high as 27.5cm, D-slice4-2). At 0.2, that much jitter stays
+        // visibly "crawling" toward its settled position for several seconds after a
+        // label becomes visible or is re-placed -- longer than alpha-scope.md's "a
+        // few seconds" latency budget comfortably allows. 0.5 closes 1-(0.5)^n of the
+        // error per n iterations: 87.5% within 3 iterations (~3s at the same
+        // placeholder cadence), which fits that budget with real margin, while still
+        // meaningfully damping frame-to-frame jitter (each association still halves
+        // the remaining error, not a full jump to the latest noisy estimate). Revisit
+        // together with the cadence assumption itself at Task 6's device gate, once a
+        // real inference cadence and real jitter figures exist to compute against.
+        private const float SmoothingFactor = 0.5f;
 
         // Object Tagger slice 5 Task 4 Step 3 — minimum-apparent-size reference
         // distance and base scale.
@@ -339,6 +393,9 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // >= ConfirmationsBeforeVisible) and not-yet-confirmed labels — a spurious
             // detection that never reaches confirmation is still cleaned up once it
             // stops being re-detected, not lingering forever unconfirmed.
+            //
+            // Deliberately runs BEFORE the per-frame visual pass below, so a view that
+            // is about to be removed this same frame is never redundantly refreshed.
             for (int i = m_boxViews.Count - 1; i >= 0; i--)
             {
                 var view = m_boxViews[i];
@@ -348,6 +405,139 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     m_boxViews.RemoveAt(i);
                 }
             }
+
+            // Object Tagger slice 5 final-review fix — CRITICAL finding: labels did
+            // not actually billboard. See RefreshLabelViews's own comment for the
+            // full explanation; this call is what makes it run every frame instead of
+            // only at inference cadence.
+            //
+            // Nothing to refresh with an empty list — skip the camera-pose query
+            // entirely rather than pay for it (and its DllImport call) every frame
+            // when there are no labels on screen.
+            if (m_boxViews.Count == 0)
+            {
+                return;
+            }
+
+            if (TryGetCurrentCameraPose(out var cameraPose))
+            {
+                RefreshLabelViews(cameraPose.position);
+            }
+            // else: the current head pose is not reliable this frame (see
+            // TryGetCurrentCameraPose). Every view simply keeps whatever
+            // rotation/scale/position it last had — a stale-by-one-frame render is
+            // an unnoticeable, graceful degradation; computing fresh values from a
+            // garbage near-origin pose would not be.
+        }
+
+        // Object Tagger slice 5 final-review fix — mirrors the exact reliability
+        // check SentisInferenceRunManager.RunInference already performs before
+        // trusting m_cameraAccess.GetCameraPose() (see that method, ~line 244-252).
+        //
+        // WHY THIS CHECK EXISTS: PassthroughCameraAccess.GetCameraPose() calls
+        // OVRPlugin.GetNodePoseStateAtTime internally, but does NOT itself verify
+        // that call succeeded — on failure, the underlying OVRPlugin wrapper returns
+        // PoseStatef.identity (confirmed by reading OVRPlugin.cs in the installed
+        // com.meta.xr.sdk.core package), i.e. a pose at the WORLD ORIGIN with
+        // identity rotation, not the last-known-good pose and not an exception.
+        // GetCameraPose() then applies the lens offset to that and returns it
+        // looking like an ordinary, valid Pose — there is no way to distinguish a
+        // real near-origin head pose from a failed query by inspecting the return
+        // value alone.
+        //
+        // Calling GetCameraPose() every frame without this guard would risk
+        // occasionally computing this frame's label rotation/scale/position from
+        // that garbage origin pose whenever the underlying native query has a
+        // transient failure — a visible one-frame snap/flicker toward the origin,
+        // exactly the kind of glitch this fix wave exists to eliminate, not
+        // reintroduce. SentisInferenceRunManager already established the fix for
+        // this failure mode (skip this frame's work entirely); this method applies
+        // the identical pattern here rather than inventing a second one.
+        //
+        // Cost/safety of calling this every frame: the underlying native call is a
+        // single head-pose query — Quest apps routinely query head pose once per
+        // render frame as a matter of course, so this is not a new category of cost,
+        // just an additional call site for one that already happens elsewhere in the
+        // same frame's pipeline (camera rendering itself).
+        private bool TryGetCurrentCameraPose(out Pose pose)
+        {
+            pose = default;
+
+            if (!m_cameraAccess.IsPlaying)
+            {
+                return false;
+            }
+
+            [DllImport("OVRPlugin", CallingConvention = CallingConvention.Cdecl)]
+            static extern OVRPlugin.Result ovrp_GetNodePoseStateAtTime(double time, OVRPlugin.Node nodeId, out OVRPlugin.PoseStatef nodePoseState);
+            if (!ovrp_GetNodePoseStateAtTime(OVRPlugin.GetTimeInSeconds(), OVRPlugin.Node.Head, out _).IsSuccess())
+            {
+                return false;
+            }
+
+            pose = m_cameraAccess.GetCameraPose();
+            return true;
+        }
+
+        /// Object Tagger slice 5 final-review fix — the CRITICAL finding's fix.
+        ///
+        /// Runs every frame (from Update(), guarded by TryGetCurrentCameraPose)
+        /// over EVERY view in m_boxViews, not just this frame's detections — a
+        /// retained-but-not-redetected label still needs its orientation, scale,
+        /// and position refreshed every frame too, from the CURRENT camera pose.
+        /// Previously all of this lived inside DrawUIBoxes's per-detection loop,
+        /// which only runs at inference cadence (at most ~1Hz, per the placeholder
+        /// assumption elsewhere in this file) — so a label's card stayed frozen at
+        /// whatever the camera pose was at its LAST inference for up to its entire
+        /// grace period, failing alpha-scope.md line 69 ("Labels face the user from
+        /// every approach angle") the moment the camera moved afterward. It also
+        /// meant the minimum-apparent-size scale went stale the same way, and
+        /// ApplyOverlapOffsets could not clear a visual collision caused purely by
+        /// camera movement (no new detection required for that to happen).
+        ///
+        /// Stop Condition 4 (state must not move back into RectTransforms): this
+        /// method only READS from LabelRecord and computes fresh every call — it
+        /// never writes anything back into a LabelRecord field. Same pattern
+        /// ApplyOverlapOffsets already used correctly.
+        ///
+        /// Visibility (SetActive) is included here too, per the final review's
+        /// Minor #10: it doesn't depend on camera pose at all, but making it a
+        /// per-frame invariant enforced by construction (rather than something that
+        /// happens to be correct today only because it is read from state that
+        /// doesn't change between detections) is low risk and keeps every per-view
+        /// visual property in the same one place.
+        ///
+        /// Text content (view.Label.text) deliberately stays in DrawUIBoxes's
+        /// per-detection loop, not here — it only needs to change when a new
+        /// detection is associated; re-setting it every frame would be wasted work
+        /// and was never part of what was broken.
+        private void RefreshLabelViews(Vector3 cameraPosition)
+        {
+            foreach (var view in m_boxViews)
+            {
+                var record = view.Record;
+                var boxRectTransform = view.RectTransform;
+
+                boxRectTransform.gameObject.SetActive(
+                    LabelPresentation.IsVisible(record.ConfirmationCount, ConfirmationsBeforeVisible));
+
+                boxRectTransform.rotation = LabelPresentation.FaceCameraRotation(record.SmoothedPosition, cameraPosition);
+
+                var cardDistance = Vector3.Distance(cameraPosition, record.SmoothedPosition);
+                var cardScale = LabelPresentation.ComputeCardScale(cardDistance, BaseCardScale, ReferenceDistanceMeters);
+                boxRectTransform.localScale = Vector3.one * cardScale;
+            }
+
+            // Object Tagger slice 5 Task 5 Step 1's ApplyOverlapOffsets already sets
+            // RectTransform.position (assigning SmoothedPosition + any needed offset,
+            // never adding to whatever position was already there) for every
+            // currently-visible view, including its correctly-handled zero-visible
+            // (no-op) and lone-visible (reset to bare SmoothedPosition) cases — see
+            // that method's own comment. Now that it runs every frame with the
+            // CURRENT camera position instead of once per DrawUIBoxes call with the
+            // inference-time one, it is sufficient on its own as the position step;
+            // no separate "set position with no offset" call is needed here.
+            ApplyOverlapOffsets(cameraPosition);
         }
 
         /// Object Tagger slice 3 Task 4: the single guarded label lookup.
@@ -355,6 +545,17 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         /// Upstream indexed m_labels at TWO sites with no bounds check. An out-of-range
         /// classId threw IndexOutOfRange from deep inside the draw loop, which on device
         /// reads as "detection stopped working" rather than "the labels file is wrong".
+        // Object Tagger slice 5 final-review fix (Minor #9): returns the RAW class
+        // name, unmangled. Previously this replaced spaces with underscores here and
+        // the render site (DrawUIBoxes) replaced them back for display — a lossy
+        // round-trip for any class name containing a genuine underscore (harmless
+        // for the actual COCO class list this project uses, but LabelRecord.ClassName
+        // is meant to be this record's source of truth, and a mangled value sitting
+        // in a "source of truth" field is worse than it needs to be). The record now
+        // stores the real name directly. The one call site that still wants the
+        // underscore form for its log line (the depth-miss log in DrawUIBoxes)
+        // mangles it locally, right there, instead of relying on this method to do
+        // it globally.
         private string LabelFor(int classId)
         {
             if (m_labels == null || classId < 0 || classId >= m_labels.Length)
@@ -362,7 +563,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 Debug.LogError($"[ObjectTagger] class id {classId} is outside the label range (labels={m_labels?.Length ?? 0}).");
                 return $"class_{classId}";
             }
-            return m_labels[classId].Replace(" ", "_");
+            return m_labels[classId];
         }
 
         public void SetLabels(TextAsset labelsAsset)
@@ -467,7 +668,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     // centre that generated them instead. More useful anyway: it says
                     // WHERE on screen the detection failed to resolve, which is what a
                     // depth-miss investigation actually needs.
-                    Debug.Log($"[ObjectTagger] depth miss for '{classname}' at normalizedCenter:{normalizedCenter}, " +
+                    //
+                    // classname is mangled (spaces -> underscores) right here, at this
+                    // one log call site, rather than by LabelFor() globally — see
+                    // LabelFor's own comment (Minor #9 fix).
+                    Debug.Log($"[ObjectTagger] depth miss for '{classname.Replace(' ', '_')}' at normalizedCenter:{normalizedCenter}, " +
                               $"samples:{m_depthSamplesPerDetection}, cameraPose:{cameraPose}");
                     continue;
                 }
@@ -483,15 +688,21 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // Calculate distance and center point first
                 float distance = Vector3.Distance(cameraPose.position, worldPos.Value);
                 var worldSpaceCenter = m_cameraAccess.ViewportPointToRay(normRect.center, cameraPose).GetPoint(distance);
-                var normal = (worldSpaceCenter - cameraPose.position).normalized;
 
                 // Object Tagger slice 5 Task 4 Step 2: the corner-ray reconstruction
                 // that used to live here (intersecting minRay/maxRay against a plane
                 // to derive a Vector2 size for the box's RectTransform) is retired.
                 // It existed solely to size a bounding box, and there is no bounding
                 // box any more (locked decision: a billboarded text card + anchor dot,
-                // no box, no outline). worldSpaceCenter/normal above are unaffected —
-                // they come from normRect.center, not from the corner rays.
+                // no box, no outline). worldSpaceCenter above is unaffected — it comes
+                // from normRect.center, not from the corner rays.
+                //
+                // Object Tagger slice 5 final-review fix: the per-detection facing
+                // direction/rotation that used to be computed here (`normal`, then
+                // Quaternion.LookRotation(normal) below) is gone. It was computed once
+                // at inference time and never touched again, which is the CRITICAL
+                // finding this fix wave exists for — see RefreshLabelViews, which now
+                // computes rotation fresh every frame from the CURRENT camera position.
 
                 var view = GetOrCreateBoxView(detection.classId, worldSpaceCenter, out var wasAssociation);
 
@@ -537,19 +748,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 record.LastAssociatedScore = detection.score;
                 record.LastSeenTime = Time.time;
 
-                // Step 2: the view is a PROJECTION of the record, not the other way
-                // round. Everything the RectTransform is set to below is read from
-                // `record`, never stored back into it.
-                //
-                // Object Tagger slice 5 Task 3: visibility gate. Each frame, every
-                // BoxView's active state is set based on whether it has reached the
-                // confirmation threshold. This keeps the invariant (state lives on
-                // LabelRecord, view is a pure projection) intact and ensures newly-
-                // spawned labels are invisible until confirmed.
-                var boxRectTransform = view.RectTransform;
-                boxRectTransform.gameObject.SetActive(
-                    LabelPresentation.IsVisible(record.ConfirmationCount, ConfirmationsBeforeVisible));
-
                 // Object Tagger slice 5 Task 4 Step 1: "<class> — <confidence>%",
                 // rounded, from the RECORD's LastAssociatedScore (last accepted
                 // detection's score, unsmoothed — smoothing applies to position
@@ -558,51 +756,31 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // rendering it. Score is a 0-1 probability (m_scoreThreshold is
                 // [Range(0,1)], defaulted to 0.23/0.3 across this project's
                 // configs), so *100 rounded is a percentage, not double-scaling an
-                // already-scaled value. Reads record.ClassName (not the local
-                // `classname`) so the view stays a projection of the record, not of
-                // loop-local state. LabelFor() replaces spaces with underscores for
-                // internal/log use (ClassName, debug lines) — reversed here for
-                // display only, so a COCO class like "cell phone" doesn't render as
-                // "cell_phone" on the card.
-                var displayClassName = record.ClassName.Replace('_', ' ');
-                view.Label.text = $"{displayClassName} — {Mathf.RoundToInt(record.LastAssociatedScore * 100)}%";
-
-                // Position is read from SmoothedPosition (which has latency built in via
-                // smoothing) rather than WorldPosition (raw estimate), so jitter is dampened.
-                // This position is also the anchor dot's literal world position — the dot
-                // is a child of boxRectTransform at local anchoredPosition (0,0), so it
-                // tracks SmoothedPosition exactly regardless of the scale applied below.
+                // already-scaled value. Reads record.ClassName directly (final-review
+                // fix, Minor #9: it is now the raw unmangled name, not a
+                // spaces-to-underscores mangled value that needed reversing for
+                // display — see LabelFor's comment) so the view stays a projection of
+                // the record, not of loop-local state.
                 //
-                // Rotation: Quaternion.LookRotation(normal) is the existing billboard/
-                // face-camera behaviour, carried forward unchanged from Task 1-3 — no new
-                // component needed (Object Tagger slice 5 Task 4 Step 3).
-                boxRectTransform.SetPositionAndRotation(record.SmoothedPosition, Quaternion.LookRotation(normal));
-
-                // Object Tagger slice 5 Task 4 Step 3: minimum-apparent-size scale.
-                // See ReferenceDistanceMeters/BaseCardScale and
-                // LabelPresentation.ComputeCardScale for the full reasoning. Distance
-                // is measured from the camera to the label's SMOOTHED position (what
-                // is actually rendered), not the raw WorldPosition, so the scale
-                // doesn't jitter independently of the position it's scaling.
-                var cardDistance = Vector3.Distance(cameraPose.position, record.SmoothedPosition);
-                var cardScale = LabelPresentation.ComputeCardScale(cardDistance, BaseCardScale, ReferenceDistanceMeters);
-                boxRectTransform.localScale = Vector3.one * cardScale;
+                // Text content only needs to change when a new detection is
+                // associated — this is the only per-detection-loop write to the view
+                // left after the final-review fix moved rotation/scale/visibility/
+                // position into the per-frame RefreshLabelViews pass (see Update()).
+                view.Label.text = $"{record.ClassName} — {Mathf.RoundToInt(record.LastAssociatedScore * 100)}%";
             }
-
-            // Object Tagger slice 5 Task 5 Step 1: resolve visual overlap between
-            // DIFFERENT labels over the FULL current visible set, not just this
-            // frame's detections -- a label that is confirmed and still inside its
-            // grace period but wasn't re-detected this particular frame is still
-            // rendered and can still visually collide with one that was. Runs once
-            // per DrawUIBoxes call, after every per-detection position/rotation/
-            // scale update above is already computed, per the locked decision that
-            // this is purely a render-time adjustment. See ApplyOverlapOffsets.
-            ApplyOverlapOffsets(cameraPose.position);
         }
 
         /// Object Tagger slice 5 Task 5 Step 1: applies LabelOverlap's pairwise
         /// vertical-offset resolution to every currently-VISIBLE view's rendered
         /// position.
+        ///
+        /// Object Tagger slice 5 final-review fix: called from RefreshLabelViews
+        /// (Update()'s per-frame visual pass) with the CURRENT camera position now,
+        /// rather than once per DrawUIBoxes call with the inference-time one. The
+        /// logic below is unchanged -- only WHEN it runs and WHICH camera position
+        /// it is given changed. This is also why the "reads state fresh, assigns
+        /// rather than adds" discipline described below matters even more now: it
+        /// runs far more often (every frame, not once per inference).
         ///
         /// Deliberately reads LabelRecord.SmoothedPosition (the state) as the
         /// base position for every view, and ASSIGNS (not adds) the result to
@@ -610,7 +788,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         /// position and never writes the offset back into the record. Reading
         /// the RectTransform's position would make the offset accumulate frame
         /// over frame for a view that stays visible-but-undetected across
-        /// several DrawUIBoxes calls (see LabelOverlap.ComputeVerticalOffsets's
+        /// several calls (see LabelOverlap.ComputeVerticalOffsets's
         /// comment for why that is a real bug, not a theoretical one), and
         /// writing the offset into the record would violate Stop Condition 4 by
         /// the same principle that RectTransform state must not move back into
@@ -741,17 +919,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private BoxView GetViewFromPoolOrCreate()
         {
-            // Object Tagger slice 5 Task 3: do NOT activate here. Task 3 gates
-            // visibility on ConfirmationCount in DrawUIBoxes — labels start invisible
-            // and only become visible once ConfirmationCount >= ConfirmationsBeforeVisible.
-            // Activating here would cause freshly-spawned labels to flash visible
-            // for the remainder of the frame before DrawUIBoxes sets ConfirmationCount.
-            // Keeping activation deactivated here keeps the invariant in one place
-            // (DrawUIBoxes's SetActive call per frame per view).
+            // Object Tagger slice 5 Task 3: do NOT activate here. Visibility is
+            // gated on ConfirmationCount — labels start invisible and only become
+            // visible once ConfirmationCount >= ConfirmationsBeforeVisible. Final-
+            // review fix: that gate is now applied by RefreshLabelViews (Update()'s
+            // per-frame visual pass), not DrawUIBoxes — see RefreshLabelViews's
+            // comment. Activating here would cause freshly-spawned labels to flash
+            // visible for the remainder of the frame before that pass runs. Keeping
+            // activation deactivated here keeps the invariant in one place.
             if (m_boxViewPool.Count > 0)
             {
                 var pooled = m_boxViewPool[m_boxViewPool.Count - 1];
-                // Do not activate; DrawUIBoxes controls visibility.
+                // Do not activate; RefreshLabelViews controls visibility.
                 m_boxViewPool.RemoveAt(m_boxViewPool.Count - 1);
                 return pooled;
             }
@@ -765,7 +944,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // just later. See the BoxView.Label comment for why this must be
             // cached rather than looked up per-frame.
             var label = boxRectTransform.GetComponentInChildren<Text>(true);
-            // Start deactivated; DrawUIBoxes controls visibility.
+            // Start deactivated; RefreshLabelViews controls visibility.
             boxRectTransform.gameObject.SetActive(false);
             return new BoxView
             {
