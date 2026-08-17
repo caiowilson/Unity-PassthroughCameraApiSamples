@@ -219,7 +219,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // on every Graphic (Text and the anchor-dot Image) found under its
         // RectTransform, applied once at creation. No new prefab/material is
         // needed.
-        private const float GhostAlphaMultiplier = 0.5f;
+        private const float GhostAlphaMultiplier = 0.3f;
 
         private static readonly Vector2 FrameCenter = new Vector2(0.5f, 0.5f);
 
