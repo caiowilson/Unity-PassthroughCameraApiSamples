@@ -36,13 +36,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private void OnTrackingLost() => m_isHeadsetTracking = false;
         private void OnTrackingAcquired() => m_isHeadsetTracking = true;
 
-        // Object Tagger slice 5 Task 1: the ONLY thing removed from this method is the
-        // SpawnCurrentDetectedObjects() call inside the A-button branch — that method
-        // is deleted below because it read BoundingBoxData.BoxRectTransform, which no
-        // longer exists. m_isStarted, the if/else structure, and the A-button check
-        // are left exactly as they were; the A-button branch is now a no-op (button
-        // press detected, nothing happens) rather than removed, matching the brief's
-        // "delete exactly these six items" scope — nothing here was on that list.
+        // Object Tagger manual-tagging Task 4 — A commits the live
+        // candidate; B is overloaded by press duration: a quick press
+        // untags the nearest committed label, a hold past
+        // HoldToClearAllThresholdSeconds clears every label.
         private void Update()
         {
             if (!m_isStarted)
@@ -55,29 +52,55 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
             else
             {
-                // Press A button to spawn 3d markers
                 if (InputManager.IsButtonADownOrPinchStarted())
                 {
-                    // Object Tagger slice 5 Task 1: SpawnCurrentDetectedObjects() is
-                    // deleted (below) along with the rest of the marker-spawn feature.
-                    // Final-review fix (Important #5): the deletion was originally
-                    // justified as removing "confirmed dead" code; the project's
-                    // validation record (docs/validation/2026-08-15-slice-5-labels.md,
-                    // D-slice5-1) later found that claim was FALSE — the feature was
-                    // very likely live in the running app. The deletion itself stands
-                    // regardless: the design spec
-                    // (docs/superpowers/specs/2026-08-14-object-tagger-alpha-design.md,
-                    // line 57) explicitly states "the sample's marker interaction which
-                    // is not adopted", which is independent, spec-level authority to
-                    // remove it whether or not it was live. This branch is left as a
-                    // no-op rather than removed — see the method comment above.
+                    m_uiInference.TryCommitLiveCandidate();
                 }
             }
 
-            // Press B button to clean all markers
-            if (InputManager.IsButtonBDownOrMiddleFingerPinchStarted())
+            UpdateBButtonHoldState();
+        }
+
+        // Object Tagger manual-tagging Task 4 — B-button/pinch hold-duration
+        // state machine.
+        //
+        // Clear-all fires the instant the hold crosses the threshold (not
+        // deferred to release), giving immediate feedback for a hold gesture
+        // rather than making the user release first to see anything happen.
+        // m_bClearAllFired guards against ALSO firing a targeted untag on
+        // release once clear-all has already fired for this press.
+        private const float HoldToClearAllThresholdSeconds = 1f;
+        private bool m_bIsHeld;
+        private float m_bPressStartTime;
+        private bool m_bClearAllFired;
+
+        private void UpdateBButtonHoldState()
+        {
+            var isHeldNow = InputManager.IsButtonBHeldOrMiddleFingerPinchHeld();
+
+            if (isHeldNow && !m_bIsHeld)
             {
-                CleanMarkers();
+                // Press started this frame.
+                m_bIsHeld = true;
+                m_bPressStartTime = Time.time;
+                m_bClearAllFired = false;
+            }
+            else if (isHeldNow && m_bIsHeld)
+            {
+                if (!m_bClearAllFired && InputHoldClassification.HasReachedHoldThreshold(m_bPressStartTime, Time.time, HoldToClearAllThresholdSeconds))
+                {
+                    m_uiInference.ClearAnnotations();
+                    m_bClearAllFired = true;
+                }
+            }
+            else if (!isHeldNow && m_bIsHeld)
+            {
+                // Released.
+                if (!m_bClearAllFired)
+                {
+                    m_uiInference.TryUntagNearestToCenter();
+                }
+                m_bIsHeld = false;
             }
         }
 
