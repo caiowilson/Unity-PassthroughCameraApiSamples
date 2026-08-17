@@ -25,7 +25,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // start menu
         private int m_objectsDetected = 0;
-        private int m_objectsIdentified = 0;
 
         // pause menu
         public bool IsPaused { get; private set; } = true;
@@ -152,27 +151,24 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 ? "\n<<< MODEL FAILED TO LOAD - no inference is running >>>"
                 : string.Empty;
 
+            // Object Tagger slice 5 Task 5 Step 2: "Objects identified" removed.
+            // Task 1 deleted DetectionManager.cs's OnObjectsIdentified UnityEvent
+            // along with the marker-spawn feature it existed to report (correctly
+            // removed, not adopted per the design spec). Nothing has called
+            // OnObjectsIndentified below since, so this line was permanently
+            // stuck at "Objects identified: 0" -- a live, always-visible panel
+            // showing a fixed value reads as a real observation ("nothing has
+            // ever been identified") when it is actually dead instrumentation.
+            // Removed rather than fed with new counting, matching how this
+            // project only surfaces state that is genuinely meaningful (see
+            // m_anchorTracked/m_modelLoadFailed above).
             m_labelInformation.text =
-                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}\nObjects identified: {m_objectsIdentified}{modelLine}{anchorLine}";
+                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}{modelLine}{anchorLine}";
         }
 
         public void OnObjectsDetected(int objects)
         {
             m_objectsDetected = objects;
-            UpdateLabelInformation();
-        }
-
-        public void OnObjectsIndentified(int objects)
-        {
-            if (objects < 0)
-            {
-                // reset the counter
-                m_objectsIdentified = 0;
-            }
-            else
-            {
-                m_objectsIdentified += objects;
-            }
             UpdateLabelInformation();
         }
         #endregion

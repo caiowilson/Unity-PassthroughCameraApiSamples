@@ -157,6 +157,50 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private const float ReferenceDistanceMeters = 1f;
         private const float BaseCardScale = 1f;
 
+        // Object Tagger slice 5 Task 5 Step 1 — overlap detection threshold.
+        //
+        // The card's rendered visual footprint (not the layout RectTransform's
+        // 0.2m x 0.2m bounding box, which is mostly empty margin) is: text cap
+        // height = font size 50 x the text RectTransform's local scale 0.0005 =
+        // 0.025m (2.5cm), and the anchor dot is 0.02m (2cm) across, so the
+        // card's angular height at ReferenceDistanceMeters (1m) is
+        // 2*atan(0.025/1) =~ 2.86deg. 3deg is chosen as "about one card-height" --
+        // two label centres closer together than that in the camera's view are
+        // close enough for their cards to visually collide. Because
+        // LabelPresentation.ComputeCardScale holds the card's APPARENT size
+        // constant for every distance beyond ReferenceDistanceMeters (that is
+        // the entire point of that function -- see its own comment), this same
+        // 3deg figure applies unchanged across the whole 1-4m acceptance range;
+        // it needs no distance term, unlike the offset amount below which does.
+        //
+        // KNOWN LIMITATION: Vector3.Angle (see LabelOverlap.AngularSeparationDegrees)
+        // is a CONE test around the camera -- it does not distinguish horizontal
+        // from vertical crowding. Two cards sitting side-by-side horizontally at
+        // 2deg apart are legible on screen but get flagged as overlapping, and
+        // pushing one of them UP barely changes the cone angle between them, so
+        // such a pair can stay flagged as overlapping even after the offset is
+        // applied. The offset pass is still stable (no crash, no runaway growth,
+        // one push per pair per DrawUIBoxes call, see LabelOverlap.ComputeVerticalOffsets)
+        // -- it just does not guarantee full legibility for that specific
+        // horizontal-crowding case. Accepted per the task brief's own scope
+        // note: a correct pairwise resolution that behaves sanely under 3+
+        // labels is sufficient; a 2D-rect projection test would fix this but is
+        // more machinery than the stated two-label scenario calls for.
+        private const float OverlapAngleThresholdDegrees = 3f;
+
+        // Object Tagger slice 5 Task 5 Step 1 — overlap offset amount.
+        //
+        // 0.06m (6cm) at ReferenceDistanceMeters clears the card's ~5cm visible
+        // footprint (2.5cm text + 2cm dot + the 0.03m anchored gap between them,
+        // see OverlapAngleThresholdDegrees's comment) with a small margin. Like
+        // the threshold above, this is scaled by ComputeCardScale per farther
+        // label in LabelOverlap.ComputeVerticalOffsets (using the SAME
+        // BaseCardScale/ReferenceDistanceMeters constants the card's own render
+        // scale uses) so the offset's ANGULAR effect stays constant beyond
+        // ReferenceDistanceMeters too -- a fixed 0.06m world-space push would
+        // under-clear a card whose own world-space size has grown 4x by 4m.
+        private const float OverlapOffsetMeters = 0.06f;
+
         private readonly List<BoxView> m_boxViews = new();
         private string[] m_labels;
         private readonly List<BoxView> m_boxViewPool = new();
@@ -534,6 +578,85 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 var cardDistance = Vector3.Distance(cameraPose.position, record.SmoothedPosition);
                 var cardScale = LabelPresentation.ComputeCardScale(cardDistance, BaseCardScale, ReferenceDistanceMeters);
                 boxRectTransform.localScale = Vector3.one * cardScale;
+            }
+
+            // Object Tagger slice 5 Task 5 Step 1: resolve visual overlap between
+            // DIFFERENT labels over the FULL current visible set, not just this
+            // frame's detections -- a label that is confirmed and still inside its
+            // grace period but wasn't re-detected this particular frame is still
+            // rendered and can still visually collide with one that was. Runs once
+            // per DrawUIBoxes call, after every per-detection position/rotation/
+            // scale update above is already computed, per the locked decision that
+            // this is purely a render-time adjustment. See ApplyOverlapOffsets.
+            ApplyOverlapOffsets(cameraPose.position);
+        }
+
+        /// Object Tagger slice 5 Task 5 Step 1: applies LabelOverlap's pairwise
+        /// vertical-offset resolution to every currently-VISIBLE view's rendered
+        /// position.
+        ///
+        /// Deliberately reads LabelRecord.SmoothedPosition (the state) as the
+        /// base position for every view, and ASSIGNS (not adds) the result to
+        /// the RectTransform -- never reads the RectTransform's own current
+        /// position and never writes the offset back into the record. Reading
+        /// the RectTransform's position would make the offset accumulate frame
+        /// over frame for a view that stays visible-but-undetected across
+        /// several DrawUIBoxes calls (see LabelOverlap.ComputeVerticalOffsets's
+        /// comment for why that is a real bug, not a theoretical one), and
+        /// writing the offset into the record would violate Stop Condition 4 by
+        /// the same principle that RectTransform state must not move back into
+        /// LabelRecord -- this is the mirror case: view-only adjustments must
+        /// not leak back into the record either.
+        ///
+        /// Invisible (unconfirmed) labels are excluded: LabelPresentation.IsVisible
+        /// gates whether a view is even rendered, so an invisible label cannot
+        /// visually collide with anything.
+        ///
+        /// KNOWN CONSEQUENCE: offsetting boxRectTransform's position also moves
+        /// the anchor dot, which is a CHILD of boxRectTransform at local
+        /// anchoredPosition (0,0) (see BoxView's comment: the dot "tracks
+        /// SmoothedPosition exactly"). An offset card's dot therefore no longer
+        /// sits on the real-world object -- it moves with the card. This is the
+        /// direct, intended consequence of the locked decision (offset the
+        /// RENDERED position); splitting the dot from the card to keep it
+        /// anchored to the true position while the text moves would need a
+        /// prefab hierarchy change, which is out of this task's scope. Flagged
+        /// here so Task 6's device gate knows to look at it.
+        private void ApplyOverlapOffsets(Vector3 cameraPosition)
+        {
+            var visibleViews = new List<BoxView>(m_boxViews.Count);
+            foreach (var view in m_boxViews)
+            {
+                if (LabelPresentation.IsVisible(view.Record.ConfirmationCount, ConfirmationsBeforeVisible))
+                {
+                    visibleViews.Add(view);
+                }
+            }
+
+            if (visibleViews.Count < 2)
+            {
+                // 0 or 1 visible views: nothing can overlap. Still worth an
+                // explicit early-out rather than relying on
+                // ComputeVerticalOffsets's inner loop to no-op, since it also
+                // skips allocating the basePositions snapshot below for the
+                // overwhelmingly common case (most frames have far fewer than
+                // 2 confirmed labels close enough in view to matter).
+                return;
+            }
+
+            var basePositions = new Vector3[visibleViews.Count];
+            for (var i = 0; i < visibleViews.Count; i++)
+            {
+                basePositions[i] = visibleViews[i].Record.SmoothedPosition;
+            }
+
+            var offsets = LabelOverlap.ComputeVerticalOffsets(
+                cameraPosition, basePositions, OverlapAngleThresholdDegrees, OverlapOffsetMeters,
+                BaseCardScale, ReferenceDistanceMeters);
+
+            for (var i = 0; i < visibleViews.Count; i++)
+            {
+                visibleViews[i].RectTransform.position = basePositions[i] + Vector3.up * offsets[i];
             }
         }
 
