@@ -16,7 +16,7 @@ namespace ObjectTagger.Tests.EditMode
 {
     public class LabelAssociationTests
     {
-        private const float Threshold = 2.0f;
+        private const float Threshold = 0.1f;
         private const float GracePeriod = 3f;
 
         private static List<LabelAssociation.Existing> One(int classId, Vector3 pos, float lastSeenTime) =>
@@ -25,9 +25,9 @@ namespace ObjectTagger.Tests.EditMode
         [Test]
         public void SameClassAndCloseAssociates()
         {
-            // 10cm away, well under the 2.0m threshold.
+            // 3cm away, well under the 0.1m threshold.
             var existing = One(classId: 5, pos: new Vector3(1f, 0f, 2f), lastSeenTime: 0f);
-            var newPos = new Vector3(1.1f, 0f, 2f);
+            var newPos = new Vector3(1.03f, 0f, 2f);
 
             var decision = LabelAssociation.Decide(existing, 5, newPos, currentTime: 0.1f, Threshold, GracePeriod);
 
@@ -38,7 +38,7 @@ namespace ObjectTagger.Tests.EditMode
         [Test]
         public void SameClassButFarSpawnsNewAndReapsTheStaleOne()
         {
-            // 5m away — unambiguously outside the 2.0m threshold — but still
+            // 5m away — unambiguously outside the 0.1m threshold — but still
             // inside the 3s grace period (only 0.5s old). This is the
             // moved-object case Step 3 targets: exactly one same-class
             // candidate, so it is unambiguous.
@@ -164,8 +164,8 @@ namespace ObjectTagger.Tests.EditMode
         {
             var existing = new List<LabelAssociation.Existing>
             {
-                new(classId: 5, worldPosition: new Vector3(0.2f, 0f, 0f), lastSeenTime: 0f),
-                new(classId: 5, worldPosition: new Vector3(0.05f, 0f, 0f), lastSeenTime: 0f),
+                new(classId: 5, worldPosition: new Vector3(0.08f, 0f, 0f), lastSeenTime: 0f),
+                new(classId: 5, worldPosition: new Vector3(0.03f, 0f, 0f), lastSeenTime: 0f),
             };
             var newPos = Vector3.zero;
 

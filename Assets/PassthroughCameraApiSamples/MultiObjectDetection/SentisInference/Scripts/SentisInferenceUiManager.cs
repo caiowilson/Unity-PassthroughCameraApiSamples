@@ -78,26 +78,36 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger slice 5 Task 2 — the association distance threshold.
         //
-        // 2.00m (200cm), set by explicit user ruling, given twice and
-        // reconfirmed directly on 2026-08-16. See D-slice5-2 in the docs
-        // repo's validation record, ~/Work/object-tagger/docs/validation/
-        // 2026-08-15-slice-5-labels.md. This overrides the plan's own
-        // advisory guidance of a threshold "in the tens of centimetres" —
-        // Task 2 was first implemented at 0.3m, reasoning independently from
-        // that guidance and from slice 4's scatter data
-        // (docs/validation/2026-08-15-slice-4-spatial-placement.md: mean
-        // accuracy ~2cm, scatter +/-13cm, one disputed 27.5cm reading,
-        // D-slice4-2) without ever seeing the ruling. This is a fix, not a
-        // re-derivation: 2.00m is final and is not being re-litigated here.
+        // 0.10m (10cm), set by explicit user ruling on 2026-08-16 during
+        // Task 6's device gate. See D-slice5-4 in the docs repo's validation
+        // record, ~/Work/object-tagger/docs/validation/
+        // 2026-08-15-slice-5-labels.md. This SUPERSEDES the prior 2.00m
+        // value (D-slice5-2): the on-device Task 6 Step 2 check that value's
+        // own comment called for found that two same-class objects (two
+        // drinking glasses) merged into one label at close range, and the
+        // user clarified directly that the earlier "2.00m" ruling — despite
+        // being given and reconfirmed twice — was itself a misunderstanding.
+        // There is no separate "detection range" concept; this is the only
+        // threshold, and 0.10m is what the user wants it to be. Not a
+        // re-derivation from the plan's own advisory guidance ("tens of
+        // centimetres") either — asked for directly, as an exact number,
+        // after the plan's vague phrasing contributed to the earlier 0.3m
+        // vs. 2.00m confusion.
         //
-        // Known, accepted cost of this value: two same-class objects within
-        // 2m of each other (e.g. two chairs at a table) will now associate
-        // into one label instead of two — the opposite failure mode from the
-        // 0.3m value it replaces. This is exactly the tradeoff ruling #7 in
-        // this workspace's progress.md already accepts. Task 6 Step 2 ("two
-        // simultaneous labels, individually legible") is the empirical check
-        // for whether it holds up in practice.
-        private const float AssociationDistanceMeters = 2.0f;
+        // Known, accepted risk of this value, flagged before the user chose
+        // it and confirmed anyway: slice 4's device-measured frame-to-frame
+        // position jitter was +/-13cm (docs/validation/
+        // 2026-08-15-slice-4-spatial-placement.md, its decisive corrected
+        // reading), which EXCEEDS this 0.10m threshold. That measurement
+        // predates this slice's position smoothing (SmoothingFactor,
+        // below), so it is not a direct read on post-smoothing jitter, but
+        // it is the closest real figure available. If a single static
+        // object's own re-detections drift by more than 10cm, they could
+        // fail to re-associate with their own label, producing duplicate or
+        // flickering labels on one object — the opposite failure mode from
+        // the over-merging this value fixes. Re-verify specifically for
+        // this at the next on-device check.
+        private const float AssociationDistanceMeters = 0.1f;
 
         // Object Tagger slice 5 Task 3: confirmation count before a label becomes visible.
         //
