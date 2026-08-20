@@ -12,8 +12,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         [SerializeField] private CompanionReadinessController m_readinessController;
         [SerializeField] private DetectionUiMenuManager m_menuManager;
+        [SerializeField] private SentisInferenceUiManager m_uiInference;
 
         private readonly RemoteNamingSession m_session = new RemoteNamingSession();
+        private Guid? m_activeOperationId;
         private string m_lastPublishedPresentation;
 
         public bool IsReady =>
@@ -40,7 +42,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 return false;
             }
 
-            var requestId = Guid.NewGuid().ToString("N");
+            if (m_uiInference == null || !m_uiInference.TryResolveCenterPoint(out var point))
+            {
+                return false;
+            }
+
+            var operationId = Guid.NewGuid();
+            var requestId = operationId.ToString("N");
             if (!m_session.TryBegin(
                     m_readinessController.IsReady,
                     m_menuManager.IsPaused,
@@ -49,25 +57,55 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 return false;
             }
 
+            m_activeOperationId = operationId;
             PublishPresentation();
+
+            if (!m_uiInference.CreatePendingRemoteLabel(operationId, point))
+            {
+                FailOperation(requestId, operationId);
+                return false;
+            }
 
             if (!TryCaptureJpeg(frame, out var jpeg) || jpeg.Length > MaximumJpegBytes)
             {
-                m_session.TryFail(requestId);
-                PublishPresentation();
+                FailOperation(requestId, operationId);
                 return false;
             }
 
             StartCoroutine(SendNameRequest(
                 m_readinessController.CurrentConfig,
                 requestId,
+                operationId,
                 jpeg));
             return true;
+        }
+
+        public bool TryCancelPending()
+        {
+            if (!m_session.IsRequestActive)
+            {
+                return false;
+            }
+
+            var requestId = m_session.ActiveRequestId;
+            var operationId = m_activeOperationId;
+            var canceled = m_session.TryFail(requestId);
+            if (operationId.HasValue)
+            {
+                m_uiInference?.RemoveRemoteLabel(operationId.Value);
+                if (m_activeOperationId == operationId)
+                {
+                    m_activeOperationId = null;
+                }
+            }
+            PublishPresentation();
+            return canceled;
         }
 
         private IEnumerator SendNameRequest(
             RemoteRecognitionConfig config,
             string requestId,
+            Guid operationId,
             byte[] jpeg)
         {
             var sections = new List<IMultipartFormSection>(2)
@@ -87,17 +125,55 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                                 RemoteNameProtocol.IsSuccessfulHttpStatus(request.responseCode);
                 if (succeeded &&
                     RemoteNameProtocol.TryParse(request.downloadHandler.text, out var response) &&
-                    m_session.TryAccept(response, Time.realtimeSinceStartup))
+                    m_session.IsRequestActive &&
+                    m_session.ActiveRequestId == requestId &&
+                    response.RequestId == requestId)
                 {
+                    if (response.Found)
+                    {
+                        if (!m_uiInference.CommitRemoteLabel(operationId, response.Name) ||
+                            !m_session.TryAccept(response, Time.realtimeSinceStartup))
+                        {
+                            FailOperation(requestId, operationId);
+                            yield break;
+                        }
+
+                        if (m_activeOperationId == operationId)
+                        {
+                            m_activeOperationId = null;
+                        }
+                        PublishPresentation();
+                        yield break;
+                    }
+
+                    m_session.TryAccept(response, Time.realtimeSinceStartup);
+                    if (m_session.IsRequestActive)
+                    {
+                        FailOperation(requestId, operationId);
+                        yield break;
+                    }
+
+                    m_uiInference.RemoveRemoteLabel(operationId);
+                    if (m_activeOperationId == operationId)
+                    {
+                        m_activeOperationId = null;
+                    }
                     PublishPresentation();
                     yield break;
                 }
             }
 
-            // A rejected, malformed, or failed response cannot leave the matching
-            // operation busy forever. The request ID still owns this transition, so a
-            // late operation cannot clear a newer one.
+            FailOperation(requestId, operationId);
+        }
+
+        private void FailOperation(string requestId, Guid operationId)
+        {
+            m_uiInference?.RemoveRemoteLabel(operationId);
             m_session.TryFail(requestId);
+            if (m_activeOperationId == operationId)
+            {
+                m_activeOperationId = null;
+            }
             PublishPresentation();
         }
 

@@ -64,6 +64,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                          m_cameraAccess.IsPlaying,
                          m_uiMenuManager.IsPaused,
                          m_wasPausedLastFrame) &&
+                     m_spatialAnchor != null &&
+                     m_spatialAnchor.IsTracked &&
                      InputManager.IsButtonADownOrPinchStarted())
             {
                 m_remoteNaming?.TryStart(m_cameraAccess.GetTexture());
@@ -122,6 +124,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             {
                 if (!m_bClearAllFired && InputHoldClassification.HasReachedHoldThreshold(m_bPressStartTime, Time.time, HoldToClearAllThresholdSeconds))
                 {
+                    m_remoteNaming?.TryCancelPending();
                     m_uiInference.ClearAnnotations();
                     m_bClearAllFired = true;
                 }
@@ -131,7 +134,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // Released.
                 if (!m_bClearAllFired)
                 {
-                    m_uiInference.TryUntagNearestToCenter();
+                    var canceledPending = m_remoteNaming != null && m_remoteNaming.TryCancelPending();
+                    if (!canceledPending)
+                    {
+                        m_uiInference.TryUntagNearestToCenter();
+                    }
                 }
                 m_bIsHeld = false;
             }
@@ -252,6 +259,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 m_spatialAnchor = null;
 
                 CleanMarkers();
+                m_remoteNaming?.TryCancelPending();
                 m_uiInference.ClearAnnotations();
             }
         }

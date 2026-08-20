@@ -84,5 +84,19 @@ namespace ObjectTagger.Tests.EditMode
                 1,
                 m_contentParent.Cast<Transform>().Count(child => child.gameObject.activeSelf));
         }
+
+        [Test]
+        public void ClearAnnotationsRemovesPendingCardAndRejectsLateCommit()
+        {
+            var operationId = Guid.NewGuid();
+
+            Assert.IsTrue(m_manager.CreatePendingRemoteLabel(operationId, Vector3.one));
+            var card = m_contentParent.Cast<Transform>().Single(child => child.gameObject.activeSelf);
+
+            m_manager.ClearAnnotations();
+
+            Assert.IsFalse(card.gameObject.activeSelf);
+            Assert.IsFalse(m_manager.CommitRemoteLabel(operationId, "late mug"));
+        }
     }
 }
