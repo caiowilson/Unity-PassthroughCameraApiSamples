@@ -54,8 +54,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 }
             }
             else if (m_uiMenuManager != null &&
-                     !m_uiMenuManager.IsPaused &&
-                     !m_wasPausedLastFrame &&
+                     RemoteNamingInputPolicy.CanStart(
+                         m_cameraAccess.IsPlaying,
+                         m_uiMenuManager.IsPaused,
+                         m_wasPausedLastFrame) &&
                      InputManager.IsButtonADownOrPinchStarted())
             {
                 m_remoteNaming?.TryStart(m_cameraAccess.GetTexture());

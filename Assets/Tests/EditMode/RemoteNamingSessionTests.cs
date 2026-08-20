@@ -10,6 +10,24 @@ namespace ObjectTagger.Tests.EditMode
 {
     public class RemoteNamingSessionTests
     {
+        [TestCase(true, false, false, true)]
+        [TestCase(false, false, false, false)]
+        [TestCase(true, true, false, false)]
+        [TestCase(true, false, true, false)]
+        public void GestureRoutingRequiresLivePlaybackAndDismissedWelcomeTransition(
+            bool cameraIsPlaying,
+            bool appPaused,
+            bool wasPausedLastFrame,
+            bool expected)
+        {
+            Assert.AreEqual(
+                expected,
+                RemoteNamingInputPolicy.CanStart(
+                    cameraIsPlaying,
+                    appPaused,
+                    wasPausedLastFrame));
+        }
+
         [TestCase(false, false)]
         [TestCase(true, true)]
         public void BeginRequiresReadyCompanionAndDismissedWelcome(bool companionReady, bool appPaused)

@@ -78,8 +78,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 yield return request.SendWebRequest();
 
                 var succeeded = request.result == UnityWebRequest.Result.Success &&
-                                request.responseCode >= 200 &&
-                                request.responseCode < 300;
+                                RemoteNameProtocol.IsSuccessfulHttpStatus(request.responseCode);
                 if (succeeded &&
                     RemoteNameProtocol.TryParse(request.downloadHandler.text, out var response) &&
                     m_session.TryAccept(response, Time.realtimeSinceStartup))

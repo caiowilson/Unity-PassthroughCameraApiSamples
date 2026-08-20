@@ -1,6 +1,7 @@
 using System;
 using System.Text.RegularExpressions;
-using UnityEngine;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace PassthroughCameraSamples.MultiObjectDetection
 {
@@ -30,52 +31,60 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             @"\A[a-z]+(?:[-'][a-z]+)*(?: [a-z]+(?:[-'][a-z]+)*){0,4}\z",
             RegexOptions.CultureInvariant);
 
-        private static readonly Regex FoundPropertyPattern = new Regex(
-            "\"found\"\\s*:",
-            RegexOptions.CultureInvariant);
-
         public static bool TryParse(string json, out RemoteNameResponse response)
         {
             response = null;
-            if (string.IsNullOrWhiteSpace(json) || !FoundPropertyPattern.IsMatch(json))
+            if (string.IsNullOrWhiteSpace(json))
             {
                 return false;
             }
 
-            RemoteNamePayload payload;
+            JObject payload;
             try
             {
-                payload = JsonUtility.FromJson<RemoteNamePayload>(json);
+                payload = JObject.Parse(
+                    json,
+                    new JsonLoadSettings
+                    {
+                        DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error,
+                    });
             }
-            catch (ArgumentException)
+            catch (JsonException)
             {
                 return false;
             }
 
-            if (payload == null ||
-                payload.protocol_version != RemoteRecognitionConfig.SupportedProtocolVersion ||
-                !IsValidRequestId(payload.request_id))
+            if (!TryReadString(payload, "protocol_version", out var protocolVersion) ||
+                protocolVersion != RemoteRecognitionConfig.SupportedProtocolVersion ||
+                !TryReadString(payload, "request_id", out var requestId) ||
+                !IsValidRequestId(requestId) ||
+                !payload.TryGetValue("found", StringComparison.Ordinal, out var foundToken) ||
+                foundToken.Type != JTokenType.Boolean)
             {
                 return false;
             }
 
-            if (payload.found)
+            var found = foundToken.Value<bool>();
+            var nameToken = payload.GetValue("name", StringComparison.Ordinal);
+            string name = null;
+            if (found)
             {
-                if (!IsValidName(payload.name))
+                if (nameToken == null || nameToken.Type != JTokenType.String)
+                {
+                    return false;
+                }
+                name = nameToken.Value<string>();
+                if (!IsValidName(name))
                 {
                     return false;
                 }
             }
-            else if (payload.name != null)
+            else if (nameToken != null)
             {
                 return false;
             }
 
-            response = new RemoteNameResponse(
-                payload.protocol_version,
-                payload.request_id,
-                payload.found,
-                payload.name);
+            response = new RemoteNameResponse(protocolVersion, requestId, found, name);
             return true;
         }
 
@@ -84,18 +93,27 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return requestId != null && RequestIdPattern.IsMatch(requestId);
         }
 
+        public static bool IsSuccessfulHttpStatus(long statusCode)
+        {
+            return statusCode == 200;
+        }
+
         public static bool IsValidName(string name)
         {
             return name != null && NamePattern.IsMatch(name);
         }
 
-        [Serializable]
-        private sealed class RemoteNamePayload
+        private static bool TryReadString(JObject payload, string propertyName, out string value)
         {
-            public string protocol_version;
-            public string request_id;
-            public bool found;
-            public string name;
+            value = null;
+            if (!payload.TryGetValue(propertyName, StringComparison.Ordinal, out var token) ||
+                token.Type != JTokenType.String)
+            {
+                return false;
+            }
+
+            value = token.Value<string>();
+            return true;
         }
     }
 }
