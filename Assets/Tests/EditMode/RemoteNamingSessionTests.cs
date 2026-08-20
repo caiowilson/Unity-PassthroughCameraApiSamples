@@ -89,7 +89,7 @@ namespace ObjectTagger.Tests.EditMode
         }
 
         [Test]
-        public void MatchingNotFoundResponseReturnsToIdleWithoutPresentation()
+        public void MatchingNotFoundResponseIsUnsuccessfulAndReturnsToIdle()
         {
             var session = new RemoteNamingSession();
             session.TryBegin(true, false, "request-1");
@@ -98,7 +98,7 @@ namespace ObjectTagger.Tests.EditMode
                 new RemoteNameResponse("1", "request-1", false, null),
                 10f);
 
-            Assert.IsTrue(accepted);
+            Assert.IsFalse(accepted);
             Assert.IsFalse(session.IsRequestActive);
             Assert.IsNull(session.PresentationText);
         }

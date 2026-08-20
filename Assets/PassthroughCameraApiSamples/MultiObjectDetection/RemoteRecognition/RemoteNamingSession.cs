@@ -51,7 +51,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             if (!response.Found)
             {
                 ResetToIdle();
-                return true;
+                return false;
             }
 
             m_state = SessionState.ShowingSuccess;
