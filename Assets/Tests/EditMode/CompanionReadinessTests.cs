@@ -1,5 +1,7 @@
 using NUnit.Framework;
 using PassthroughCameraSamples.MultiObjectDetection;
+using UnityEditor;
+using UnityEngine;
 
 namespace ObjectTagger.Tests.EditMode
 {
@@ -113,6 +115,23 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.AreEqual(expectedKind, state.Kind);
             Assert.IsFalse(state.IsReady);
+        }
+
+        [Test]
+        public void DetectionUiPrefabSerializesTheReadinessController()
+        {
+            const string prefabPath =
+                "Assets/PassthroughCameraApiSamples/MultiObjectDetection/DetectionManager/Prefabs/DetectionUiMenuPrefab.prefab";
+            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(prefabPath);
+
+            Assert.IsNotNull(prefab);
+            Assert.IsNotNull(prefab.GetComponent<CompanionReadinessController>());
+        }
+
+        [Test]
+        public void PlayerAllowsTrustedLanHttpForTheCompanionProtocol()
+        {
+            Assert.AreEqual(InsecureHttpOption.AlwaysAllowed, PlayerSettings.insecureHttpOption);
         }
     }
 }

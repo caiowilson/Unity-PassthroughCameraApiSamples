@@ -29,7 +29,7 @@ MonoBehaviour:
   boundaryVisibilitySupport: 0
   disableBackups: 1
   enableNSCConfig: 1
-  securityXmlPath: 
+  securityXmlPath: Assets/ObjectTaggerBuild/network_sec_config.xml
   horizonOsSdkDisabled: 0
   minHorizonOsSdkVersion: 68
   targetHorizonOsSdkVersion: 74

@@ -26,14 +26,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private bool m_initialMenu;
         private CompanionReadiness m_companionReadiness = CompanionReadiness.Loading();
 
-        private void Awake()
-        {
-            if (GetComponent<CompanionReadinessController>() == null)
-            {
-                gameObject.AddComponent<CompanionReadinessController>();
-            }
-        }
-
         // start menu
         private int m_objectsDetected = 0;
 

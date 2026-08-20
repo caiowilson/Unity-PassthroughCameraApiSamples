@@ -1,5 +1,6 @@
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using UnityEngine.Networking;
@@ -13,9 +14,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private readonly CompanionReadinessStateMachine m_stateMachine = new CompanionReadinessStateMachine();
         private DetectionUiMenuManager m_menuManager;
 
-        private string ConfigPath =>
-            Path.Combine(Application.persistentDataPath, RemoteRecognitionConfig.FileName);
-
         private void Awake()
         {
             m_menuManager = GetComponent<DetectionUiMenuManager>();
@@ -23,12 +21,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private IEnumerator Start()
         {
+            Debug.Log("[ObjectTagger] companion readiness controller started");
+
             if (!TryLoadConfiguration(out var config))
             {
+                Debug.LogWarning("[ObjectTagger] companion configuration is missing or invalid");
                 Publish(CompanionReadiness.InvalidConfiguration());
                 yield break;
             }
 
+            Debug.Log("[ObjectTagger] companion configuration loaded");
             Publish(m_stateMachine.BeginProbe());
 
             while (enabled)
@@ -40,10 +42,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     request.SetRequestHeader("Authorization", $"Bearer {config.BearerToken}");
                     request.timeout = RemoteRecognitionConfig.RequiredRequestTimeoutSeconds;
 
+                    Debug.Log("[ObjectTagger] companion health probe started");
                     yield return request.SendWebRequest();
 
                     var transportFailed = request.result == UnityWebRequest.Result.ConnectionError ||
                                           request.result == UnityWebRequest.Result.DataProcessingError;
+                    Debug.Log($"[ObjectTagger] companion health probe completed result={request.result} status={request.responseCode}");
                     Publish(CompanionHealthProtocol.Evaluate(request.responseCode, transportFailed, request.downloadHandler.text));
                 }
 
@@ -57,20 +61,34 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private bool TryLoadConfiguration(out RemoteRecognitionConfig config)
         {
-            config = null;
+            return RemoteRecognitionConfigFile.TryLoad(ConfigurationPaths(), out config);
+        }
+
+        private static IEnumerable<string> ConfigurationPaths()
+        {
+            yield return Path.Combine(Application.persistentDataPath, RemoteRecognitionConfig.FileName);
+
+#if UNITY_ANDROID && !UNITY_EDITOR
+            string appOwnedFilesDirectory = null;
             try
             {
-                if (!File.Exists(ConfigPath))
+                using (var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
+                using (var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity"))
+                using (var filesDirectory = activity.Call<AndroidJavaObject>("getFilesDir"))
                 {
-                    return false;
+                    appOwnedFilesDirectory = filesDirectory.Call<string>("getAbsolutePath");
                 }
-
-                return RemoteRecognitionConfig.TryParse(File.ReadAllText(ConfigPath), out config, out _);
             }
-            catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+            catch (Exception exception) when (exception is AndroidJavaException || exception is NullReferenceException)
             {
-                return false;
+                // The normal Unity path remains available when Android context lookup fails.
             }
+
+            if (!string.IsNullOrEmpty(appOwnedFilesDirectory))
+            {
+                yield return Path.Combine(appOwnedFilesDirectory, RemoteRecognitionConfig.FileName);
+            }
+#endif
         }
 
         private void Publish(CompanionReadiness observation)

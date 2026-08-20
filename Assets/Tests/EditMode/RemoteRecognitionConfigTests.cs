@@ -1,3 +1,5 @@
+using System;
+using System.IO;
 using NUnit.Framework;
 using PassthroughCameraSamples.MultiObjectDetection;
 
@@ -92,6 +94,58 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.AreEqual(RemoteRecognitionConfigError.InvalidRequestTimeout, error);
             Assert.IsFalse(error.ToString().Contains(TestToken));
+        }
+
+        [Test]
+        public void LoaderFallsBackToALaterAppOwnedConfigurationFile()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), $"object-tagger-config-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                var inaccessibleExternalPath = Path.Combine(directory, "missing-external.json");
+                var appOwnedPath = Path.Combine(directory, "app-owned.json");
+                File.WriteAllText(appOwnedPath, ValidJson);
+
+                var loaded = RemoteRecognitionConfigFile.TryLoad(
+                    new[] { inaccessibleExternalPath, appOwnedPath },
+                    out var config);
+
+                Assert.IsTrue(loaded);
+                Assert.IsNotNull(config);
+                Assert.AreEqual("http://192.168.1.25:8765", config.MacBaseUrl);
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
+        }
+
+        [Test]
+        public void LoaderDoesNotMaskAnInvalidPrimaryConfigurationWithAFallback()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), $"object-tagger-config-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
+
+            try
+            {
+                var invalidPrimaryPath = Path.Combine(directory, "invalid-primary.json");
+                var staleFallbackPath = Path.Combine(directory, "stale-fallback.json");
+                File.WriteAllText(invalidPrimaryPath, "not-json");
+                File.WriteAllText(staleFallbackPath, ValidJson);
+
+                var loaded = RemoteRecognitionConfigFile.TryLoad(
+                    new[] { invalidPrimaryPath, staleFallbackPath },
+                    out var config);
+
+                Assert.IsFalse(loaded);
+                Assert.IsNull(config);
+            }
+            finally
+            {
+                Directory.Delete(directory, true);
+            }
         }
     }
 }
