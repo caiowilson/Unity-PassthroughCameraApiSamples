@@ -97,6 +97,18 @@ npx -y @meta-quest/hzdb files push /path/outside/the/repository/remote-recogniti
 
 Version 1 traffic is unencrypted and intended only for trusted Wi-Fi. The app UI and logs never display the bearer token.
 
+After the welcome screen is dismissed and the companion reports `Mac: ready`,
+press A or make an index-finger pinch to name the object centered in view. The
+Quest displays `Identifying...`, takes the central square covering 60% of the
+shorter live RGB-frame edge, resizes it to 896x896, encodes it as JPEG quality
+80, and uploads it in memory. The multipart request contains only a generated
+request ID and the JPEG; headset pose and world position remain on the Quest.
+The correlated name is displayed for three seconds.
+
+This branch disables continuous on-headset Sentis/YOLO inference in the shipped
+scene. Quest-local YOLO remains in the project for the later fallback slice and
+is not used when the Mac is unavailable, busy, or returning an error.
+
 ## Learn More
 
 For comprehensive information about using the Passthrough Camera API:

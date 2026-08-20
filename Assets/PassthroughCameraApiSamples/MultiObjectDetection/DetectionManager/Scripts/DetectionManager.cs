@@ -14,8 +14,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [SerializeField] private PassthroughCameraAccess m_cameraAccess;
 
         [SerializeField] private SentisInferenceUiManager m_uiInference;
+        [SerializeField] private DetectionUiMenuManager m_uiMenuManager;
+        [SerializeField] private RemoteNamingController m_remoteNaming;
 
         private bool m_isStarted;
+        private bool m_wasPausedLastFrame = true;
         internal OVRSpatialAnchor m_spatialAnchor;
         private bool m_isHeadsetTracking;
 
@@ -50,14 +53,15 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     m_isStarted = true;
                 }
             }
-            else
+            else if (m_uiMenuManager != null &&
+                     !m_uiMenuManager.IsPaused &&
+                     !m_wasPausedLastFrame &&
+                     InputManager.IsButtonADownOrPinchStarted())
             {
-                if (InputManager.IsButtonADownOrPinchStarted())
-                {
-                    m_uiInference.TryCommitLiveCandidate();
-                }
+                m_remoteNaming?.TryStart(m_cameraAccess.GetTexture());
             }
 
+            m_wasPausedLastFrame = m_uiMenuManager == null || m_uiMenuManager.IsPaused;
             UpdateBButtonHoldState();
         }
 

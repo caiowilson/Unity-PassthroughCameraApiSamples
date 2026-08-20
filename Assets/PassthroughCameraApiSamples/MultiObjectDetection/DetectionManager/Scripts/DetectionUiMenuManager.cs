@@ -25,6 +25,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private bool m_initialMenu;
         private CompanionReadiness m_companionReadiness = CompanionReadiness.Loading();
+        private string m_remoteRecognitionPresentation;
 
         // start menu
         private int m_objectsDetected = 0;
@@ -143,6 +144,17 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             UpdateLabelInformation();
         }
 
+        public void SetRemoteRecognitionPresentation(string presentation)
+        {
+            if (m_remoteRecognitionPresentation == presentation)
+            {
+                return;
+            }
+
+            m_remoteRecognitionPresentation = presentation;
+            UpdateLabelInformation();
+        }
+
         private void UpdateLabelInformation()
         {
             // The version string was hardcoded to "2.1.3" upstream. The pinned package
@@ -171,8 +183,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // Removed rather than fed with new counting, matching how this
             // project only surfaces state that is genuinely meaningful (see
             // m_anchorTracked/m_modelLoadFailed above).
+            var recognitionLine = string.IsNullOrEmpty(m_remoteRecognitionPresentation)
+                ? string.Empty
+                : $"\n{m_remoteRecognitionPresentation}";
+
             m_labelInformation.text =
-                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}{modelLine}{anchorLine}\n{m_companionReadiness.Message}";
+                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}{modelLine}{anchorLine}\n{m_companionReadiness.Message}{recognitionLine}";
         }
 
         public void OnObjectsDetected(int objects)

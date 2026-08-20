@@ -1798,6 +1798,17 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: ea678c754c1748f40b56a3732c318359, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+--- !u!114 &6846995557286463108 stripped
+MonoBehaviour:
+  m_CorrespondingSourceObject: {fileID: 3481964808845765432, guid: 259c0c899b7e0c14aa431eefdc0aacc6, type: 3}
+  m_PrefabInstance: {fileID: 1019656467722773290}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6ef7a35df1aa4e0ba08de382718436f0, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
 --- !u!1001 &7042133910910641334
 PrefabInstance:
   m_ObjectHideFlags: 0
@@ -1890,6 +1901,14 @@ PrefabInstance:
       propertyPath: OnObjectsIdentified.m_PersistentCalls.m_Calls.Array.data[0].m_Target
       value: 
       objectReference: {fileID: 6846995557286463107}
+    - target: {fileID: 7042133912099342454, guid: 946c4bcf5ee78c2438bd71dd2f9fe1f9, type: 3}
+      propertyPath: m_readinessController
+      value:
+      objectReference: {fileID: 6846995557286463108}
+    - target: {fileID: 7042133912099342454, guid: 946c4bcf5ee78c2438bd71dd2f9fe1f9, type: 3}
+      propertyPath: m_menuManager
+      value:
+      objectReference: {fileID: 6846995557286463107}
     m_RemovedComponents: []
     m_RemovedGameObjects: []
     m_AddedGameObjects: []
@@ -1923,6 +1942,10 @@ PrefabInstance:
       propertyPath: OnObjectsDetected.m_PersistentCalls.m_Calls.Array.data[0].m_Target
       value: 
       objectReference: {fileID: 6846995557286463107}
+    - target: {fileID: 2681575481727882275, guid: 927c1b782bb796b4b9b433d533cbccca, type: 3}
+      propertyPath: m_Enabled
+      value: 0
+      objectReference: {fileID: 0}
     - target: {fileID: 2681575481727882275, guid: 927c1b782bb796b4b9b433d533cbccca, type: 3}
       propertyPath: m_cameraAccess
       value: 

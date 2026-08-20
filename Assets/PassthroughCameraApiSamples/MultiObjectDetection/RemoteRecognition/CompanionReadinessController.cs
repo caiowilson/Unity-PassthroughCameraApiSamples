@@ -14,6 +14,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private readonly CompanionReadinessStateMachine m_stateMachine = new CompanionReadinessStateMachine();
         private DetectionUiMenuManager m_menuManager;
 
+        public CompanionReadiness Current => m_stateMachine.Current;
+        public bool IsReady => Current.IsReady && CurrentConfig != null;
+        public RemoteRecognitionConfig CurrentConfig { get; private set; }
+
         private void Awake()
         {
             m_menuManager = GetComponent<DetectionUiMenuManager>();
@@ -30,6 +34,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 yield break;
             }
 
+            CurrentConfig = config;
             Debug.Log("[ObjectTagger] companion configuration loaded");
             Publish(m_stateMachine.BeginProbe());
 

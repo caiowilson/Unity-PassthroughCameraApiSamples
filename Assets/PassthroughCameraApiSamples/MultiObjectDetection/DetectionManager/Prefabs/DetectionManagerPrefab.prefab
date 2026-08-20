@@ -10,6 +10,7 @@ GameObject:
   m_Component:
   - component: {fileID: 7042133912099342452}
   - component: {fileID: 7042133912099342453}
+  - component: {fileID: 7042133912099342454}
   m_Layer: 0
   m_Name: DetectionManagerPrefab
   m_TagString: Untagged
@@ -48,6 +49,8 @@ MonoBehaviour:
   m_spawnMarker: {fileID: 0}
   m_placeSound: {fileID: 0}
   m_uiInference: {fileID: 0}
+  m_uiMenuManager: {fileID: 0}
+  m_remoteNaming: {fileID: 7042133912099342454}
   OnObjectsIdentified:
     m_PersistentCalls:
       m_Calls:
@@ -63,3 +66,17 @@ MonoBehaviour:
           m_StringArgument: 
           m_BoolArgument: 0
         m_CallState: 2
+--- !u!114 &7042133912099342454
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 7042133912099342345}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ab02fdabca0a420ab79c95531211d854, type: 3}
+  m_Name:
+  m_EditorClassIdentifier:
+  m_readinessController: {fileID: 0}
+  m_menuManager: {fileID: 0}
