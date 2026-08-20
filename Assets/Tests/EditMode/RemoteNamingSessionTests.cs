@@ -28,6 +28,30 @@ namespace ObjectTagger.Tests.EditMode
                     wasPausedLastFrame));
         }
 
+        [TestCase(true,  true,  false, false, true,  true)]
+        [TestCase(false, true,  false, false, true,  false)]
+        [TestCase(true,  false, false, false, true,  false)]
+        [TestCase(true,  true,  true,  false, true,  false)]
+        [TestCase(true,  true,  false, true,  true,  false)]
+        [TestCase(true,  true,  false, false, false, false)]
+        public void AimReticleRequiresUsableMacInputState(
+            bool appStarted,
+            bool cameraIsPlaying,
+            bool appPaused,
+            bool wasPausedLastFrame,
+            bool companionReady,
+            bool expected)
+        {
+            Assert.AreEqual(
+                expected,
+                RemoteNamingInputPolicy.ShouldShowAimReticle(
+                    appStarted,
+                    cameraIsPlaying,
+                    appPaused,
+                    wasPausedLastFrame,
+                    companionReady));
+        }
+
         [TestCase(false, false)]
         [TestCase(true, true)]
         public void BeginRequiresReadyCompanionAndDismissedWelcome(bool companionReady, bool appPaused)
@@ -131,13 +155,28 @@ namespace ObjectTagger.Tests.EditMode
                 var detectionManager = sceneBehaviours.OfType<DetectionManager>().Single();
                 var remoteNaming = detectionManager.GetComponent<RemoteNamingController>();
                 var runManager = sceneBehaviours.OfType<SentisInferenceRunManager>().Single();
+                var reticle = scene.GetRootGameObjects()
+                    .SelectMany(root => root.GetComponentsInChildren<Transform>(true))
+                    .Single(transform => transform.name == "RemoteAimReticle");
+                var reticleText = reticle.GetComponentInChildren<UnityEngine.UI.Text>(true);
 
                 Assert.IsNotNull(remoteNaming);
+
+                Assert.AreEqual("CenterEyeAnchor", reticle.parent.name);
+                Assert.AreEqual(0f, reticle.localPosition.x, 0.0001f);
+                Assert.AreEqual(0f, reticle.localPosition.y, 0.0001f);
+                Assert.Greater(reticle.localPosition.z, 0f);
+                Assert.IsNotNull(reticleText);
+                Assert.AreEqual("•", reticleText.text);
+                Assert.IsFalse(reticleText.raycastTarget);
 
                 var detectionManagerObject = new SerializedObject(detectionManager);
                 Assert.AreSame(
                     remoteNaming,
                     detectionManagerObject.FindProperty("m_remoteNaming").objectReferenceValue);
+
+                var aimProperty = detectionManagerObject.FindProperty("m_aimReticle");
+                Assert.AreSame(reticle.gameObject, aimProperty.objectReferenceValue);
 
                 var remoteNamingObject = new SerializedObject(remoteNaming);
                 Assert.IsNotNull(

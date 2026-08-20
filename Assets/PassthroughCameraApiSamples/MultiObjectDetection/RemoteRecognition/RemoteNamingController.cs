@@ -16,6 +16,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private readonly RemoteNamingSession m_session = new RemoteNamingSession();
         private string m_lastPublishedPresentation;
 
+        public bool IsReady =>
+            isActiveAndEnabled &&
+            m_readinessController != null &&
+            m_readinessController.IsReady &&
+            m_readinessController.CurrentConfig != null;
+
         private void Update()
         {
             m_session.Tick(Time.realtimeSinceStartup);

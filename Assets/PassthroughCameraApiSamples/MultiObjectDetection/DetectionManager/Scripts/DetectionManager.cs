@@ -16,6 +16,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [SerializeField] private SentisInferenceUiManager m_uiInference;
         [SerializeField] private DetectionUiMenuManager m_uiMenuManager;
         [SerializeField] private RemoteNamingController m_remoteNaming;
+        [SerializeField] private GameObject m_aimReticle;
 
         private bool m_isStarted;
         private bool m_wasPausedLastFrame = true;
@@ -31,6 +32,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void OnDestroy()
         {
+            if (m_aimReticle != null)
+            {
+                m_aimReticle.SetActive(false);
+            }
+
             EraseSpatialAnchor();
             OVRManager.TrackingLost -= OnTrackingLost;
             OVRManager.TrackingAcquired -= OnTrackingAcquired;
@@ -63,8 +69,29 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 m_remoteNaming?.TryStart(m_cameraAccess.GetTexture());
             }
 
+            UpdateAimReticle();
             m_wasPausedLastFrame = m_uiMenuManager == null || m_uiMenuManager.IsPaused;
             UpdateBButtonHoldState();
+        }
+
+        private void UpdateAimReticle()
+        {
+            if (m_aimReticle == null)
+            {
+                return;
+            }
+
+            var shouldShow = RemoteNamingInputPolicy.ShouldShowAimReticle(
+                m_isStarted,
+                m_cameraAccess != null && m_cameraAccess.IsPlaying,
+                m_uiMenuManager == null || m_uiMenuManager.IsPaused,
+                m_wasPausedLastFrame,
+                m_remoteNaming != null && m_remoteNaming.IsReady);
+
+            if (m_aimReticle.activeSelf != shouldShow)
+            {
+                m_aimReticle.SetActive(shouldShow);
+            }
         }
 
         // Object Tagger manual-tagging Task 4 — B-button/pinch hold-duration

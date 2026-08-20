@@ -9,5 +9,17 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         {
             return cameraIsPlaying && !appPaused && !wasPausedLastFrame;
         }
+
+        public static bool ShouldShowAimReticle(
+            bool appStarted,
+            bool cameraIsPlaying,
+            bool appPaused,
+            bool wasPausedLastFrame,
+            bool companionReady)
+        {
+            return appStarted &&
+                   companionReady &&
+                   CanStart(cameraIsPlaying, appPaused, wasPausedLastFrame);
+        }
     }
 }
