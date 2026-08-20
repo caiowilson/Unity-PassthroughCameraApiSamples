@@ -85,6 +85,20 @@ namespace ObjectTagger.Tests.EditMode
             Assert.IsTrue(recovered.IsReady);
         }
 
+        [Test]
+        public void LaterProbeRetainsReadyUntilItsHealthObservationArrives()
+        {
+            var stateMachine = new CompanionReadinessStateMachine();
+
+            var firstProbe = stateMachine.BeginProbe();
+            stateMachine.Apply(CompanionHealthProtocol.Evaluate(200, false, "{\"protocol_version\":\"1\",\"status\":\"ready\"}"));
+            var laterProbe = stateMachine.BeginProbe();
+
+            Assert.AreEqual(CompanionReadinessKind.Loading, firstProbe.Kind);
+            Assert.AreEqual(CompanionReadinessKind.Ready, laterProbe.Kind);
+            Assert.IsTrue(laterProbe.IsReady);
+        }
+
         [TestCase("loading", CompanionReadinessKind.Loading)]
         [TestCase("error", CompanionReadinessKind.Unavailable)]
         public void StateMachineLeavesReadyForLaterHealthObservations(string status, CompanionReadinessKind expectedKind)

@@ -116,7 +116,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
     public sealed class CompanionReadinessStateMachine
     {
+        private bool m_hasBegunProbe;
+
         public CompanionReadiness Current { get; private set; } = CompanionReadiness.Loading();
+
+        public CompanionReadiness BeginProbe()
+        {
+            if (!m_hasBegunProbe)
+            {
+                m_hasBegunProbe = true;
+                Current = CompanionReadiness.Loading();
+            }
+
+            return Current;
+        }
 
         public CompanionReadiness Apply(CompanionReadiness observation)
         {

@@ -29,10 +29,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 yield break;
             }
 
+            Publish(m_stateMachine.BeginProbe());
+
             while (enabled)
             {
                 var startedAt = Time.realtimeSinceStartup;
-                Publish(CompanionReadiness.Loading());
 
                 using (var request = UnityWebRequest.Get($"{config.MacBaseUrl}/v1/health"))
                 {
