@@ -10,6 +10,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return cameraIsPlaying && !appPaused && !wasPausedLastFrame;
         }
 
+        public static bool CanStartResolvedAim(
+            bool cameraIsPlaying,
+            bool appPaused,
+            bool wasPausedLastFrame,
+            bool anchorTracked,
+            bool hasResolvedAim)
+        {
+            return anchorTracked &&
+                   hasResolvedAim &&
+                   CanStart(cameraIsPlaying, appPaused, wasPausedLastFrame);
+        }
+
         public static bool ShouldShowAimReticle(
             bool appStarted,
             bool cameraIsPlaying,

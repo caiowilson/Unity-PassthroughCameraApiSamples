@@ -32,21 +32,28 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         public bool TryStart(Texture frame)
         {
-            if (!isActiveAndEnabled ||
-                frame == null ||
-                m_readinessController == null ||
-                m_menuManager == null ||
-                !m_readinessController.IsReady ||
-                m_readinessController.CurrentConfig == null)
+            if (!HasStartPrerequisites(frame) ||
+                m_uiInference == null ||
+                !m_uiInference.TryResolveCenterPoint(out var point))
             {
                 return false;
             }
 
-            if (m_uiInference == null || !m_uiInference.TryResolveCenterPoint(out var point))
+            return StartAtResolvedPoint(frame, point);
+        }
+
+        public bool TryStartAtResolvedPoint(Texture frame, Vector3 point)
+        {
+            if (!HasStartPrerequisites(frame) || m_uiInference == null)
             {
                 return false;
             }
 
+            return StartAtResolvedPoint(frame, point);
+        }
+
+        private bool StartAtResolvedPoint(Texture frame, Vector3 point)
+        {
             var operationId = Guid.NewGuid();
             var requestId = operationId.ToString("N");
             if (!m_session.TryBegin(
@@ -78,6 +85,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 operationId,
                 jpeg));
             return true;
+        }
+
+        private bool HasStartPrerequisites(Texture frame)
+        {
+            return isActiveAndEnabled &&
+                   frame != null &&
+                   m_readinessController != null &&
+                   m_menuManager != null &&
+                   m_readinessController.IsReady &&
+                   m_readinessController.CurrentConfig != null;
         }
 
         public bool TryCancelPending()

@@ -20,6 +20,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private bool m_isStarted;
         private bool m_wasPausedLastFrame = true;
+        private RemoteAimFrame m_currentAimFrame;
         internal OVRSpatialAnchor m_spatialAnchor;
         private bool m_isHeadsetTracking;
 
@@ -51,6 +52,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // HoldToClearAllThresholdSeconds clears every label.
         private void Update()
         {
+            var wasStartedAtFrameStart = m_isStarted;
             if (!m_isStarted)
             {
                 // Manage the Initial Ui Menu
@@ -59,30 +61,32 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     m_isStarted = true;
                 }
             }
-            else if (m_uiMenuManager != null &&
-                     RemoteNamingInputPolicy.CanStart(
-                         m_cameraAccess.IsPlaying,
-                         m_uiMenuManager.IsPaused,
-                         m_wasPausedLastFrame) &&
-                     m_spatialAnchor != null &&
-                     m_spatialAnchor.IsTracked &&
-                     InputManager.IsButtonADownOrPinchStarted())
+
+            // Resolve once before input so the visible dot and a request started
+            // this frame share one physical-camera/depth sample.
+            UpdateAimReticle();
+
+            if (wasStartedAtFrameStart &&
+                m_uiMenuManager != null &&
+                RemoteNamingInputPolicy.CanStartResolvedAim(
+                    m_cameraAccess.IsPlaying,
+                    m_uiMenuManager.IsPaused,
+                    m_wasPausedLastFrame,
+                    m_spatialAnchor != null && m_spatialAnchor.IsTracked,
+                    m_currentAimFrame.HasResolvedTarget) &&
+                InputManager.IsButtonADownOrPinchStarted())
             {
-                m_remoteNaming?.TryStart(m_cameraAccess.GetTexture());
+                m_remoteNaming?.TryStartAtResolvedPoint(
+                    m_cameraAccess.GetTexture(),
+                    m_currentAimFrame.ResolvedPoint);
             }
 
-            UpdateAimReticle();
             m_wasPausedLastFrame = m_uiMenuManager == null || m_uiMenuManager.IsPaused;
             UpdateBButtonHoldState();
         }
 
         private void UpdateAimReticle()
         {
-            if (m_aimReticle == null)
-            {
-                return;
-            }
-
             var shouldShow = RemoteNamingInputPolicy.ShouldShowAimReticle(
                 m_isStarted,
                 m_cameraAccess != null && m_cameraAccess.IsPlaying,
@@ -90,6 +94,27 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 m_wasPausedLastFrame,
                 m_remoteNaming != null && m_remoteNaming.IsReady);
 
+            var viewer = m_aimReticle != null ? m_aimReticle.transform.parent : null;
+            var viewerPosition = viewer != null ? viewer.position : transform.position;
+            var viewerRotation = viewer != null ? viewer.rotation : transform.rotation;
+            if (shouldShow &&
+                m_uiInference != null &&
+                m_uiInference.TryResolveCenterPoint(out var targetPoint))
+            {
+                m_currentAimFrame = RemoteAimPlacement.Resolved(viewerPosition, targetPoint);
+            }
+            else
+            {
+                m_currentAimFrame = RemoteAimPlacement.Fallback(viewerPosition, viewerRotation);
+            }
+
+            if (m_aimReticle == null)
+            {
+                return;
+            }
+
+            m_aimReticle.transform.position = m_currentAimFrame.ReticleWorldPosition;
+            m_aimReticle.transform.localScale = Vector3.one * m_currentAimFrame.UniformScale;
             if (m_aimReticle.activeSelf != shouldShow)
             {
                 m_aimReticle.SetActive(shouldShow);

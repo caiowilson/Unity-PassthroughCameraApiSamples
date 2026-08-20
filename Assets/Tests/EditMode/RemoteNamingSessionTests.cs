@@ -37,6 +37,30 @@ namespace ObjectTagger.Tests.EditMode
                     wasPausedLastFrame));
         }
 
+        [TestCase(true,  false, false, true,  true,  true)]
+        [TestCase(false, false, false, true,  true,  false)]
+        [TestCase(true,  true,  false, true,  true,  false)]
+        [TestCase(true,  false, true,  true,  true,  false)]
+        [TestCase(true,  false, false, false, true,  false)]
+        [TestCase(true,  false, false, true,  false, false)]
+        public void GestureRoutingRequiresTrackedAnchorAndCurrentResolvedAim(
+            bool cameraIsPlaying,
+            bool appPaused,
+            bool wasPausedLastFrame,
+            bool anchorTracked,
+            bool hasResolvedAim,
+            bool expected)
+        {
+            Assert.AreEqual(
+                expected,
+                RemoteNamingInputPolicy.CanStartResolvedAim(
+                    cameraIsPlaying,
+                    appPaused,
+                    wasPausedLastFrame,
+                    anchorTracked,
+                    hasResolvedAim));
+        }
+
         [TestCase(true,  true,  false, false, true,  true)]
         [TestCase(false, true,  false, false, true,  false)]
         [TestCase(true,  false, false, false, true,  false)]
@@ -269,6 +293,8 @@ namespace ObjectTagger.Tests.EditMode
                 var remoteNaming = detectionManager.GetComponent<RemoteNamingController>();
                 var uiInference = sceneBehaviours.OfType<SentisInferenceUiManager>().Single();
                 var runManager = sceneBehaviours.OfType<SentisInferenceRunManager>().Single();
+                var ovrManager = sceneBehaviours.Single(
+                    behaviour => behaviour.GetType().Name == "OVRManager");
                 var reticle = scene.GetRootGameObjects()
                     .SelectMany(root => root.GetComponentsInChildren<Transform>(true))
                     .Single(transform => transform.name == "RemoteAimReticle");
@@ -279,10 +305,26 @@ namespace ObjectTagger.Tests.EditMode
                 Assert.AreEqual("CenterEyeAnchor", reticle.parent.name);
                 Assert.AreEqual(0f, reticle.localPosition.x, 0.0001f);
                 Assert.AreEqual(0f, reticle.localPosition.y, 0.0001f);
-                Assert.Greater(reticle.localPosition.z, 0f);
+                Assert.AreEqual(
+                    RemoteAimPlacement.ReferenceDistance,
+                    reticle.localPosition.z,
+                    0.0001f);
+                Assert.AreEqual(
+                    Vector3.one * RemoteAimPlacement.AuthoredScaleAtReferenceDistance,
+                    reticle.localScale);
                 Assert.IsNotNull(reticleText);
                 Assert.AreEqual("•", reticleText.text);
                 Assert.IsFalse(reticleText.raycastTarget);
+
+                var ovrManagerObject = new SerializedObject(ovrManager);
+                var simultaneousEnabled = ovrManagerObject.FindProperty(
+                    "SimultaneousHandsAndControllersEnabled");
+                var launchSimultaneous = ovrManagerObject.FindProperty(
+                    "launchSimultaneousHandsControllersOnStartup");
+                Assert.IsNotNull(simultaneousEnabled);
+                Assert.IsNotNull(launchSimultaneous);
+                Assert.IsTrue(simultaneousEnabled.boolValue);
+                Assert.IsTrue(launchSimultaneous.boolValue);
 
                 var detectionManagerObject = new SerializedObject(detectionManager);
                 Assert.AreSame(
