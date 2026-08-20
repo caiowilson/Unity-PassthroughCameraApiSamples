@@ -3,7 +3,7 @@
 // Object Tagger slice 5 Task 1, simplified by manual-tagging Task 3 —
 // plain-data record for a tracked label.
 //
-// This is the SOURCE OF TRUTH for a committed label's state. It holds no
+// This is the SOURCE OF TRUTH for a registered label's state. It holds no
 // RectTransform and no GameObject, so it can be matched, smoothed, and
 // rendered without any of that logic touching a Unity view type or a
 // MonoBehaviour.
@@ -26,8 +26,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
     public class LabelRecord
     {
         /// Identifies this label across frames independent of any view object.
-        /// Assigned once when the label is first committed.
+        /// Assigned once when the local label is committed or the remote label is created.
         public Guid SessionId;
+        public LabelSource Source;
+        public RemoteLabelState RemoteState;
+        public string RemoteName;
         public int ClassId;
         public string ClassName;
         public Vector3 WorldPosition;

@@ -35,7 +35,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // Update()), not once per DrawUIBoxes call at inference cadence — see
         // RefreshLabelViews's comment for why that distinction was the whole point
         // of this fix wave. BoxView is not retired: it remains the pairing
-        // wrapper for every committed label, and the only consumer of
+        // wrapper for every registered label, and the only consumer of
         // LabelRecord's WorldPosition.
         //
         // Deliberately a private pairing wrapper rather than a public List<LabelRecord>
@@ -51,8 +51,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // GetViewFromPoolOrCreate, and cached here rather than looked up per-frame
         // via GetComponentInChildren<Text>() inside DrawUIBoxes. That per-frame
         // lookup would have been broken: freshly-created and pooled views start
-        // deactivated (see GetViewFromPoolOrCreate) until one of their three
-        // activation call sites runs, the source prefab itself is already
+        // deactivated (see GetViewFromPoolOrCreate) until its owning
+        // activation call site runs, the source prefab itself is already
         // inactive by the time any clone is made (see Awake()), and the
         // no-argument GetComponentInChildren<T>() overload defaults
         // includeInactive to false — so a per-frame lookup would return null on
@@ -380,7 +380,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             // Nothing to refresh -- skip the camera-pose query entirely
             // rather than pay for it (and its DllImport call) every frame
-            // when there is no committed label and no live candidate.
+            // when there is no registered label and no live candidate.
             if (m_boxViews.Count == 0 && !m_liveCandidate.HasValue)
             {
                 return;
@@ -444,14 +444,35 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return true;
         }
 
+        public bool TryResolveCenterPoint(out Vector3 point)
+        {
+            point = Vector3.zero;
+            if (m_environmentRaycast == null ||
+                m_cameraAccess == null ||
+                !TryGetCurrentCameraPose(out var cameraPose))
+            {
+                return false;
+            }
+
+            var ray = m_cameraAccess.ViewportPointToRay(new Vector2(0.5f, 0.5f), cameraPose);
+            var result = m_environmentRaycast.ResolveDepth(ray);
+            if (!result.IsHit)
+            {
+                return false;
+            }
+
+            point = result.Point;
+            return true;
+        }
+
         // Object Tagger slice 5 final-review fix, simplified by manual-
         // tagging Task 3 — per-frame billboard/scale pass.
         //
         // Runs every frame (from Update(), guarded by TryGetCurrentCameraPose)
         // over every view in m_boxViews. The SetActive visibility gate from
         // slice 5 is gone: everything in m_boxViews is, by construction, a
-        // committed label and is always visible from the moment it exists
-        // until TryUntagNearestToCenter or ClearAnnotations removes it.
+        // visible local or remote label from the moment it exists
+        // until targeted removal or ClearAnnotations removes it.
         private void RefreshLabelViews(Vector3 cameraPosition)
         {
             foreach (var view in m_boxViews)
@@ -654,7 +675,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // the ghost right here rather than deferring to RefreshGhostView:
                 // RefreshGhostView only runs from Update(), past a guard
                 // (`m_boxViews.Count == 0 && !m_liveCandidate.HasValue`) that -- with
-                // no committed labels and now no live candidate -- is true starting
+                // no registered labels and now no live candidate -- is true starting
                 // this exact tick, so RefreshGhostView would never run again and the
                 // ghost's GameObject would stay active forever at its last position.
                 HideGhostView();
@@ -663,7 +684,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger slice 5 Task 5 Step 1, simplified by manual-tagging
         // Task 3 — applies LabelOverlap's pairwise vertical-offset resolution
-        // to every committed view's rendered position.
+        // to every registered view's rendered position.
         //
         // No separate visibleViews filter is needed any more: m_boxViews IS
         // the visible set now that the confirmation gate is gone.
@@ -692,21 +713,92 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         // Object Tagger manual-tagging Task 3 — the association-only lookup.
         //
-        // Snapshots m_boxViews into LabelAssociation's input shape and
-        // returns the matching index or -1. Used both by the passive
+        // Snapshots only local records into LabelAssociation's input shape,
+        // then maps any match back to its original m_boxViews index. Used both by the passive
         // per-detection loop (DrawUIBoxes, associate-only, never spawns) and
         // by TryCommitLiveCandidate (associate-or-spawn: spawns itself when
         // this returns -1).
         private int FindAssociatedViewIndex(int classId, Vector3 worldPosition)
         {
-            var existing = new LabelAssociation.Existing[m_boxViews.Count];
+            var existing = new List<LabelAssociation.Existing>(m_boxViews.Count);
+            var sourceIndices = new List<int>(m_boxViews.Count);
             for (var i = 0; i < m_boxViews.Count; i++)
             {
                 var record = m_boxViews[i].Record;
-                existing[i] = new LabelAssociation.Existing(record.ClassId, record.WorldPosition);
+                if (!RemoteSpatialLabelLifecycle.CanParticipateInLocalAssociation(record))
+                {
+                    continue;
+                }
+
+                existing.Add(new LabelAssociation.Existing(record.ClassId, record.WorldPosition));
+                sourceIndices.Add(i);
             }
 
-            return LabelAssociation.FindAssociationIndex(existing, classId, worldPosition, AssociationDistanceMeters);
+            var candidateIndex = LabelAssociation.FindAssociationIndex(
+                existing, classId, worldPosition, AssociationDistanceMeters);
+            return candidateIndex >= 0 ? sourceIndices[candidateIndex] : -1;
+        }
+
+        public bool CreatePendingRemoteLabel(Guid operationId, Vector3 point)
+        {
+            if (FindRemoteViewIndex(operationId) >= 0 ||
+                !RemoteSpatialLabelLifecycle.TryCreate(operationId, point, out var record))
+            {
+                return false;
+            }
+
+            var view = GetViewFromPoolOrCreate();
+            view.Record = record;
+            view.Label.text = RemoteSpatialLabelLifecycle.PresentationFor(record);
+            view.RectTransform.position = point;
+            view.RectTransform.gameObject.SetActive(true);
+            m_boxViews.Add(view);
+            return true;
+        }
+
+        public bool CommitRemoteLabel(Guid operationId, string name)
+        {
+            var viewIndex = FindRemoteViewIndex(operationId);
+            if (viewIndex < 0)
+            {
+                return false;
+            }
+
+            var view = m_boxViews[viewIndex];
+            if (!RemoteSpatialLabelLifecycle.TryCommit(view.Record, operationId, name))
+            {
+                return false;
+            }
+
+            view.Label.text = RemoteSpatialLabelLifecycle.PresentationFor(view.Record);
+            return true;
+        }
+
+        public bool RemoveRemoteLabel(Guid operationId)
+        {
+            var viewIndex = FindRemoteViewIndex(operationId);
+            if (viewIndex < 0)
+            {
+                return false;
+            }
+
+            ReturnToPool(m_boxViews[viewIndex]);
+            m_boxViews.RemoveAt(viewIndex);
+            return true;
+        }
+
+        private int FindRemoteViewIndex(Guid operationId)
+        {
+            for (var i = 0; i < m_boxViews.Count; i++)
+            {
+                var record = m_boxViews[i].Record;
+                if (record.Source == LabelSource.RemoteRecognition && record.SessionId == operationId)
+                {
+                    return i;
+                }
+            }
+
+            return -1;
         }
 
         // Object Tagger manual-tagging Task 3 — A-button/pinch commit.
@@ -875,23 +967,25 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // Visibility is no longer gated by a confirmation count -- that
             // mechanism (ConfirmationCount / ConfirmationsBeforeVisible) was
             // deleted this task, and RefreshLabelViews no longer calls
-            // SetActive at all. Activation is instead controlled from three
-            // separate call sites, each owning its own view's on-screen
+            // SetActive at all. Activation is instead controlled from the
+            // separate call sites that own each view's on-screen
             // state: TryCommitLiveCandidate activates a freshly-spawned
-            // committed label at the moment it is committed; CreateGhostView
-            // deactivates the ghost view immediately after creating it; and
+            // committed local label at the moment it is committed;
+            // CreatePendingRemoteLabel activates a remote label when registered;
+            // CreateGhostView deactivates the ghost view immediately after creating it; and
             // RefreshGhostView toggles the ghost active/inactive every frame
             // based on whether m_liveCandidate currently has a value.
             // (ReturnToPool also deactivates a view, but that is the pool's
             // own "nothing in the pool is visible" invariant, not one of
-            // these three.) Activating here, before any of those call sites
+            // those.) Activating here, before any of those call sites
             // runs, would risk a freshly-created view flashing visible for a
             // frame before its owning call site sets its real state.
             if (m_boxViewPool.Count > 0)
             {
                 var pooled = m_boxViewPool[m_boxViewPool.Count - 1];
-                // Do not activate; the three call sites above control visibility.
+                // Reset all prior local/remote state, but leave activation to the owning call site.
                 m_boxViewPool.RemoveAt(m_boxViewPool.Count - 1);
+                pooled.Record = new LabelRecord();
                 return pooled;
             }
 
@@ -904,7 +998,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // just later. See the BoxView.Label comment for why this must be
             // cached rather than looked up per-frame.
             var label = boxRectTransform.GetComponentInChildren<Text>(true);
-            // Start deactivated; the three call sites above control visibility.
+            // Start deactivated; the owning call sites above control visibility.
             boxRectTransform.gameObject.SetActive(false);
             return new BoxView
             {
@@ -922,7 +1016,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_boxViewPool.Add(view);
         }
 
-        internal void ClearAnnotations()
+        public void ClearAnnotations()
         {
             foreach (var view in m_boxViews)
             {
