@@ -76,6 +76,27 @@ The project contains **five sample scenes** that demonstrate how to use the **Pa
 
 For detailed setup instructions, API reference, and usage examples, see the **[Getting Started Guide](https://developers.meta.com/horizon/documentation/unity/unity-pca-documentation)**.
 
+## Optional Mac companion readiness
+
+The MultiObjectDetection information panel can report whether a trusted-LAN Mac companion is loading, ready, unavailable, or needs provisioning. Create this secret-bearing file **outside this repository** using placeholder values only as a schema reference:
+
+```json
+{
+  "protocol_version": "1",
+  "mac_base_url": "http://192.168.1.25:8765",
+  "bearer_token": "REPLACE_WITH_A_PRIVATE_TOKEN",
+  "request_timeout_seconds": 8
+}
+```
+
+After launching the app once so its data directory exists, push your private file to `/sdcard/Android/data/com.samples.passthroughcamera/files/remote-recognition.json`, then restart the app:
+
+```bash
+npx -y @meta-quest/hzdb files push /path/outside/the/repository/remote-recognition.json /sdcard/Android/data/com.samples.passthroughcamera/files/remote-recognition.json
+```
+
+Version 1 traffic is unencrypted and intended only for trusted Wi-Fi. The app UI and logs never display the bearer token.
+
 ## Learn More
 
 For comprehensive information about using the Passthrough Camera API:

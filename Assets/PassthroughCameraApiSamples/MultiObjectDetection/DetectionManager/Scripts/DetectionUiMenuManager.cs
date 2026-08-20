@@ -21,7 +21,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         public UnityEvent<bool> OnPause;
 
+        public bool IsCompanionReady => m_companionReadiness.IsReady;
+
         private bool m_initialMenu;
+        private CompanionReadiness m_companionReadiness = CompanionReadiness.Loading();
+
+        private void Awake()
+        {
+            if (GetComponent<CompanionReadinessController>() == null)
+            {
+                gameObject.AddComponent<CompanionReadinessController>();
+            }
+        }
 
         // start menu
         private int m_objectsDetected = 0;
@@ -134,6 +145,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             UpdateLabelInformation();
         }
 
+        public void SetCompanionReadiness(CompanionReadiness state)
+        {
+            m_companionReadiness = state ?? CompanionReadiness.Unavailable();
+            UpdateLabelInformation();
+        }
+
         private void UpdateLabelInformation()
         {
             // The version string was hardcoded to "2.1.3" upstream. The pinned package
@@ -163,7 +180,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // project only surfaces state that is genuinely meaningful (see
             // m_anchorTracked/m_modelLoadFailed above).
             m_labelInformation.text =
-                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}{modelLine}{anchorLine}";
+                $"Unity Inference Engine version: 2.2.1\nAI model: Yolo\nDetecting objects: {m_objectsDetected}{modelLine}{anchorLine}\n{m_companionReadiness.Message}";
         }
 
         public void OnObjectsDetected(int objects)
