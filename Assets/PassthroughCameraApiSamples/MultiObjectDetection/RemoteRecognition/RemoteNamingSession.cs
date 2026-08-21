@@ -4,16 +4,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
     {
         public const string IdentifyingPresentation = "Identifying...";
         public const float SuccessPresentationSeconds = 3f;
+        public const float FailurePresentationSeconds = 3f;
 
         private enum SessionState
         {
             Idle,
             Identifying,
             ShowingSuccess,
+            ShowingFailure,
         }
 
         private SessionState m_state;
-        private float m_successExpiresAt;
+        private float m_presentationExpiresAt;
 
         public bool IsRequestActive => m_state == SessionState.Identifying;
         public string ActiveRequestId { get; private set; }
@@ -47,20 +49,23 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 return false;
             }
 
-            ActiveRequestId = null;
             if (!response.Found)
             {
-                ResetToIdle();
+                TryFail(
+                    response.RequestId,
+                    RemoteNamingFailureKind.NotFound,
+                    realtimeSinceStartup);
                 return false;
             }
 
+            ActiveRequestId = null;
             m_state = SessionState.ShowingSuccess;
             PresentationText = response.Name;
-            m_successExpiresAt = realtimeSinceStartup + SuccessPresentationSeconds;
+            m_presentationExpiresAt = realtimeSinceStartup + SuccessPresentationSeconds;
             return true;
         }
 
-        public bool TryFail(string requestId)
+        public bool TryCancel(string requestId)
         {
             if (!IsRequestActive || ActiveRequestId != requestId)
             {
@@ -71,9 +76,35 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return true;
         }
 
+        public bool TryFail(string requestId)
+        {
+            return TryCancel(requestId);
+        }
+
+        public bool TryFail(
+            string requestId,
+            RemoteNamingFailureKind kind,
+            float realtimeSinceStartup)
+        {
+            if (!IsRequestActive ||
+                ActiveRequestId != requestId ||
+                !RemoteNamingFailurePresentation.TryGetText(kind, out var presentation))
+            {
+                return false;
+            }
+
+            m_state = SessionState.ShowingFailure;
+            ActiveRequestId = null;
+            PresentationText = presentation;
+            m_presentationExpiresAt = realtimeSinceStartup + FailurePresentationSeconds;
+            return true;
+        }
+
         public void Tick(float realtimeSinceStartup)
         {
-            if (m_state == SessionState.ShowingSuccess && realtimeSinceStartup >= m_successExpiresAt)
+            if ((m_state == SessionState.ShowingSuccess ||
+                 m_state == SessionState.ShowingFailure) &&
+                realtimeSinceStartup >= m_presentationExpiresAt)
             {
                 ResetToIdle();
             }
@@ -92,7 +123,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_state = SessionState.Idle;
             ActiveRequestId = null;
             PresentationText = null;
-            m_successExpiresAt = 0f;
+            m_presentationExpiresAt = 0f;
         }
     }
 }

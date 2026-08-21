@@ -146,7 +146,7 @@ namespace ObjectTagger.Tests.EditMode
         }
 
         [Test]
-        public void MatchingNotFoundResponseIsUnsuccessfulAndReturnsToIdle()
+        public void MatchingNotFoundResponseShowsRetryableFailure()
         {
             var session = new RemoteNamingSession();
             session.TryBegin(true, false, "request-1");
@@ -157,20 +157,94 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.IsFalse(accepted);
             Assert.IsFalse(session.IsRequestActive);
-            Assert.IsNull(session.PresentationText);
+            Assert.AreEqual("No object found — try again", session.PresentationText);
         }
 
-        [Test]
-        public void FailureOnlyReleasesTheMatchingActiveRequest()
+        [TestCase(RemoteNamingFailureKind.Timeout, "Timed out — try again")]
+        [TestCase(RemoteNamingFailureKind.Busy, "Mac busy — try again")]
+        [TestCase(RemoteNamingFailureKind.NotFound, "No object found — try again")]
+        [TestCase(RemoteNamingFailureKind.Authentication, "Authentication failed — update config")]
+        [TestCase(RemoteNamingFailureKind.InvalidPayload, "Couldn’t identify — try again")]
+        [TestCase(RemoteNamingFailureKind.InvalidResponse, "Couldn’t identify — try again")]
+        [TestCase(RemoteNamingFailureKind.ModelUnavailable, "Mac unavailable — try again")]
+        [TestCase(RemoteNamingFailureKind.Connectivity, "Mac unavailable — try again")]
+        public void MatchingFailureShowsSafeTextForThreeRealtimeSeconds(
+            RemoteNamingFailureKind kind,
+            string expectedText)
         {
             var session = new RemoteNamingSession();
             session.TryBegin(true, false, "request-1");
 
-            Assert.IsFalse(session.TryFail("request-2"));
-            Assert.IsTrue(session.IsRequestActive);
-            Assert.IsTrue(session.TryFail("request-1"));
+            Assert.IsTrue(session.TryFail("request-1", kind, 10f));
             Assert.IsFalse(session.IsRequestActive);
+            Assert.AreEqual(expectedText, session.PresentationText);
+
+            session.Tick(12.999f);
+            Assert.AreEqual(expectedText, session.PresentationText);
+
+            session.Tick(13f);
             Assert.IsNull(session.PresentationText);
+        }
+
+        [Test]
+        public void CancelOnlyReleasesMatchingRequestAndIsSilent()
+        {
+            var session = new RemoteNamingSession();
+            session.TryBegin(true, false, "request-1");
+
+            Assert.IsFalse(session.TryCancel("request-2"));
+            Assert.IsTrue(session.IsRequestActive);
+            Assert.AreEqual("request-1", session.ActiveRequestId);
+            Assert.AreEqual("Identifying...", session.PresentationText);
+
+            Assert.IsTrue(session.TryCancel("request-1"));
+            Assert.IsFalse(session.IsRequestActive);
+            Assert.IsNull(session.ActiveRequestId);
+            Assert.IsNull(session.PresentationText);
+        }
+
+        [TestCase(RemoteNamingFailureKind.None)]
+        [TestCase(RemoteNamingFailureKind.Canceled)]
+        public void NonVisibleFailureKindCannotEndActiveRequest(RemoteNamingFailureKind kind)
+        {
+            var session = new RemoteNamingSession();
+            session.TryBegin(true, false, "request-1");
+
+            Assert.IsFalse(session.TryFail("request-1", kind, 10f));
+            Assert.IsTrue(session.IsRequestActive);
+            Assert.AreEqual("request-1", session.ActiveRequestId);
+            Assert.AreEqual("Identifying...", session.PresentationText);
+        }
+
+        [Test]
+        public void WrongLateAndDuplicateFailuresCannotChangeSession()
+        {
+            var session = new RemoteNamingSession();
+            session.TryBegin(true, false, "request-1");
+
+            Assert.IsFalse(session.TryFail(
+                "wrong-request",
+                RemoteNamingFailureKind.Timeout,
+                10f));
+            Assert.IsTrue(session.IsRequestActive);
+            Assert.AreEqual("request-1", session.ActiveRequestId);
+            Assert.AreEqual("Identifying...", session.PresentationText);
+
+            Assert.IsTrue(session.TryFail(
+                "request-1",
+                RemoteNamingFailureKind.Busy,
+                10f));
+            Assert.IsFalse(session.TryFail(
+                "request-1",
+                RemoteNamingFailureKind.Authentication,
+                11f));
+            Assert.IsFalse(session.TryCancel("request-1"));
+            Assert.IsFalse(session.TryAccept(
+                new RemoteNameResponse("1", "request-1", true, "late mug"),
+                11f));
+            Assert.IsFalse(session.IsRequestActive);
+            Assert.IsNull(session.ActiveRequestId);
+            Assert.AreEqual("Mac busy — try again", session.PresentationText);
         }
 
         [Test]
@@ -178,7 +252,7 @@ namespace ObjectTagger.Tests.EditMode
         {
             var session = new RemoteNamingSession();
             Assert.IsTrue(session.TryBegin(true, false, "request-1"));
-            Assert.IsTrue(session.TryFail("request-1"));
+            Assert.IsTrue(session.TryCancel("request-1"));
 
             Assert.IsFalse(session.TryAccept(
                 new RemoteNameResponse("1", "request-1", true, "late mug"),
@@ -188,6 +262,40 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.IsTrue(session.TryBegin(true, false, "request-2"));
             Assert.AreEqual("request-2", session.ActiveRequestId);
+        }
+
+        [TestCase(RemoteNamingFailureKind.Timeout)]
+        [TestCase(RemoteNamingFailureKind.Busy)]
+        [TestCase(RemoteNamingFailureKind.NotFound)]
+        [TestCase(RemoteNamingFailureKind.Authentication)]
+        [TestCase(RemoteNamingFailureKind.InvalidPayload)]
+        [TestCase(RemoteNamingFailureKind.InvalidResponse)]
+        [TestCase(RemoteNamingFailureKind.ModelUnavailable)]
+        [TestCase(RemoteNamingFailureKind.Connectivity)]
+        public void DeliberateBeginImmediatelyAfterFailureReplacesPresentation(
+            RemoteNamingFailureKind kind)
+        {
+            var session = new RemoteNamingSession();
+            Assert.IsTrue(session.TryBegin(true, false, "request-1"));
+            Assert.IsTrue(session.TryFail("request-1", kind, 10f));
+
+            Assert.IsTrue(session.TryBegin(true, false, "request-2"));
+            Assert.IsTrue(session.IsRequestActive);
+            Assert.AreEqual("request-2", session.ActiveRequestId);
+            Assert.AreEqual("Identifying...", session.PresentationText);
+        }
+
+        [Test]
+        public void DeliberateBeginImmediatelyAfterCancelShowsIdentifying()
+        {
+            var session = new RemoteNamingSession();
+            Assert.IsTrue(session.TryBegin(true, false, "request-1"));
+            Assert.IsTrue(session.TryCancel("request-1"));
+
+            Assert.IsTrue(session.TryBegin(true, false, "request-2"));
+            Assert.IsTrue(session.IsRequestActive);
+            Assert.AreEqual("request-2", session.ActiveRequestId);
+            Assert.AreEqual("Identifying...", session.PresentationText);
         }
 
         [UnityTest]

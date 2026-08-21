@@ -5,6 +5,90 @@ namespace ObjectTagger.Tests.EditMode
 {
     public class RemoteNameProtocolTests
     {
+        [TestCase(400, "invalid_request", RemoteNamingFailureKind.InvalidPayload)]
+        [TestCase(408, "invalid_request", RemoteNamingFailureKind.InvalidPayload)]
+        [TestCase(400, "invalid_image", RemoteNamingFailureKind.InvalidPayload)]
+        [TestCase(413, "payload_too_large", RemoteNamingFailureKind.InvalidPayload)]
+        [TestCase(401, "authentication_failed", RemoteNamingFailureKind.Authentication)]
+        [TestCase(409, "busy", RemoteNamingFailureKind.Busy)]
+        [TestCase(503, "model_unavailable", RemoteNamingFailureKind.ModelUnavailable)]
+        [TestCase(504, "inference_timeout", RemoteNamingFailureKind.Timeout)]
+        public void ErrorEnvelopeMapsExactStatusAndCodePair(
+            long statusCode,
+            string code,
+            RemoteNamingFailureKind expected)
+        {
+            var json = ErrorEnvelope(code, "request-123", "sensitive server detail");
+
+            var parsed = RemoteNameProtocol.TryParseError(
+                statusCode,
+                json,
+                "request-123",
+                out var failure);
+
+            Assert.IsTrue(parsed);
+            Assert.AreEqual(expected, failure);
+        }
+
+        [Test]
+        public void ErrorEnvelopeMayOmitRequestId()
+        {
+            const string json =
+                "{\"protocol_version\":\"1\",\"error\":{" +
+                "\"code\":\"authentication_failed\",\"message\":\"ignored\"}}";
+
+            Assert.IsTrue(RemoteNameProtocol.TryParseError(
+                401,
+                json,
+                "request-123",
+                out var failure));
+            Assert.AreEqual(RemoteNamingFailureKind.Authentication, failure);
+        }
+
+        [TestCase(408, "invalid_image")]
+        [TestCase(413, "invalid_request")]
+        [TestCase(401, "busy")]
+        [TestCase(409, "model_unavailable")]
+        [TestCase(503, "inference_timeout")]
+        [TestCase(504, "authentication_failed")]
+        [TestCase(500, "invalid_request")]
+        [TestCase(400, "unknown_error")]
+        public void ErrorEnvelopeRejectsUnknownOrInconsistentStatusCodePair(
+            long statusCode,
+            string code)
+        {
+            Assert.IsFalse(RemoteNameProtocol.TryParseError(
+                statusCode,
+                ErrorEnvelope(code, "request-123", "ignored"),
+                "request-123",
+                out var failure));
+            Assert.AreEqual(RemoteNamingFailureKind.InvalidResponse, failure);
+        }
+
+        [TestCase(400, "not json")]
+        [TestCase(400, "{\"protocol_version\":\"2\",\"error\":{\"code\":\"invalid_request\",\"message\":\"ignored\"}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"error\":null}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"error\":{\"message\":\"ignored\"}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"error\":{\"code\":null,\"message\":\"ignored\"}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"error\":{\"code\":\"invalid_request\",\"message\":null}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"request_id\":null,\"error\":{\"code\":\"invalid_request\",\"message\":\"ignored\"}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"request_id\":\"other-request\",\"error\":{\"code\":\"invalid_request\",\"message\":\"ignored\"}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"protocol_version\":\"1\",\"error\":{\"code\":\"invalid_request\",\"message\":\"ignored\"}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"request_id\":\"request-123\",\"request_id\":\"request-123\",\"error\":{\"code\":\"invalid_request\",\"message\":\"ignored\"}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"error\":{\"code\":\"invalid_request\",\"code\":\"invalid_request\",\"message\":\"ignored\"}}")]
+        [TestCase(400, "{\"protocol_version\":\"1\",\"error\":{\"code\":\"invalid_request\",\"message\":\"ignored\",\"message\":\"ignored\"}}")]
+        public void ErrorEnvelopeRejectsMalformedDuplicateOrMismatchedPayload(
+            long statusCode,
+            string json)
+        {
+            Assert.IsFalse(RemoteNameProtocol.TryParseError(
+                statusCode,
+                json,
+                "request-123",
+                out var failure));
+            Assert.AreEqual(RemoteNamingFailureKind.InvalidResponse, failure);
+        }
+
         [TestCase(200, true)]
         [TestCase(201, false)]
         [TestCase(204, false)]
@@ -64,6 +148,13 @@ namespace ObjectTagger.Tests.EditMode
         public void InvalidResponseIsRejected(string json)
         {
             Assert.IsFalse(RemoteNameProtocol.TryParse(json, out _));
+        }
+
+        private static string ErrorEnvelope(string code, string requestId, string message)
+        {
+            return
+                $"{{\"protocol_version\":\"1\",\"request_id\":\"{requestId}\"," +
+                $"\"error\":{{\"code\":\"{code}\",\"message\":\"{message}\"}}}}";
         }
     }
 }

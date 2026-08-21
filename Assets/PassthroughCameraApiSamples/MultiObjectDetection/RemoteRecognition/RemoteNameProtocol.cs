@@ -88,6 +88,95 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return true;
         }
 
+        public static bool TryParseError(
+            long statusCode,
+            string json,
+            string activeRequestId,
+            out RemoteNamingFailureKind failure)
+        {
+            failure = RemoteNamingFailureKind.InvalidResponse;
+            if (string.IsNullOrWhiteSpace(json) || !IsValidRequestId(activeRequestId))
+            {
+                return false;
+            }
+
+            JObject payload;
+            try
+            {
+                payload = JObject.Parse(
+                    json,
+                    new JsonLoadSettings
+                    {
+                        DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error,
+                    });
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+
+            if (!TryReadString(payload, "protocol_version", out var protocolVersion) ||
+                protocolVersion != RemoteRecognitionConfig.SupportedProtocolVersion)
+            {
+                return false;
+            }
+
+            var requestIdToken = payload.GetValue("request_id", StringComparison.Ordinal);
+            if (requestIdToken != null &&
+                (requestIdToken.Type != JTokenType.String ||
+                 requestIdToken.Value<string>() != activeRequestId))
+            {
+                return false;
+            }
+
+            if (!payload.TryGetValue("error", StringComparison.Ordinal, out var errorToken) ||
+                errorToken.Type != JTokenType.Object)
+            {
+                return false;
+            }
+
+            var error = (JObject)errorToken;
+            if (!TryReadString(error, "code", out var code) ||
+                !TryReadString(error, "message", out _))
+            {
+                return false;
+            }
+
+            if (((statusCode == 400 || statusCode == 408) && code == "invalid_request") ||
+                (statusCode == 400 && code == "invalid_image") ||
+                (statusCode == 413 && code == "payload_too_large"))
+            {
+                failure = RemoteNamingFailureKind.InvalidPayload;
+                return true;
+            }
+
+            if (statusCode == 401 && code == "authentication_failed")
+            {
+                failure = RemoteNamingFailureKind.Authentication;
+                return true;
+            }
+
+            if (statusCode == 409 && code == "busy")
+            {
+                failure = RemoteNamingFailureKind.Busy;
+                return true;
+            }
+
+            if (statusCode == 503 && code == "model_unavailable")
+            {
+                failure = RemoteNamingFailureKind.ModelUnavailable;
+                return true;
+            }
+
+            if (statusCode == 504 && code == "inference_timeout")
+            {
+                failure = RemoteNamingFailureKind.Timeout;
+                return true;
+            }
+
+            return false;
+        }
+
         public static bool IsValidRequestId(string requestId)
         {
             return requestId != null && RequestIdPattern.IsMatch(requestId);
