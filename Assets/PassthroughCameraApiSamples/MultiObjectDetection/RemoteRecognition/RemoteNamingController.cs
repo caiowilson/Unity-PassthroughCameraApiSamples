@@ -15,19 +15,42 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [SerializeField] private SentisInferenceUiManager m_uiInference;
 
         private readonly RemoteNamingSession m_session = new RemoteNamingSession();
+        private string m_activeRequestId;
         private Guid? m_activeOperationId;
+        private UnityWebRequest m_liveRequest;
         private string m_lastPublishedPresentation;
 
-        public bool IsReady =>
+        /// <summary>
+        /// Whether the user may make a deliberate naming attempt. This stays true
+        /// across naming-result readiness downgrades after health was once ready.
+        /// </summary>
+        public bool CanAttemptNaming =>
             isActiveAndEnabled &&
             m_readinessController != null &&
-            m_readinessController.IsReady &&
-            m_readinessController.CurrentConfig != null;
+            m_readinessController.CanAttemptNaming;
 
         private void Update()
         {
             m_session.Tick(Time.realtimeSinceStartup);
             PublishPresentation();
+        }
+
+        private void OnApplicationPause(bool paused)
+        {
+            if (paused)
+            {
+                TryCancelPending();
+            }
+        }
+
+        private void OnDisable()
+        {
+            TryCancelPending();
+        }
+
+        private void OnDestroy()
+        {
+            TryCancelPending();
         }
 
         public bool TryStart(Texture frame)
@@ -54,28 +77,52 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private bool StartAtResolvedPoint(Texture frame, Vector3 point)
         {
+            if (m_session.IsRequestActive)
+            {
+                return false;
+            }
+
             var operationId = Guid.NewGuid();
             var requestId = operationId.ToString("N");
             if (!m_session.TryBegin(
-                    m_readinessController.IsReady,
+                    m_readinessController.CanAttemptNaming,
                     m_menuManager.IsPaused,
                     requestId))
             {
                 return false;
             }
 
+            m_activeRequestId = requestId;
             m_activeOperationId = operationId;
             PublishPresentation();
 
             if (!m_uiInference.CreatePendingRemoteLabel(operationId, point))
             {
-                FailOperation(requestId, operationId);
+                TryTerminateOperation(
+                    requestId,
+                    operationId,
+                    RemoteNamingFailureKind.InvalidResponse,
+                    false);
                 return false;
             }
 
-            if (!TryCaptureJpeg(frame, out var jpeg) || jpeg.Length > MaximumJpegBytes)
+            if (!TryCaptureJpeg(frame, out var jpeg))
             {
-                FailOperation(requestId, operationId);
+                return ContinueAfterCapture(requestId, operationId, null);
+            }
+
+            return ContinueAfterCapture(requestId, operationId, jpeg);
+        }
+
+        private bool ContinueAfterCapture(string requestId, Guid operationId, byte[] jpeg)
+        {
+            if (jpeg == null || jpeg.Length == 0 || jpeg.Length > MaximumJpegBytes)
+            {
+                TryTerminateOperation(
+                    requestId,
+                    operationId,
+                    RemoteNamingFailureKind.InvalidPayload,
+                    false);
                 return false;
             }
 
@@ -93,30 +140,21 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                    frame != null &&
                    m_readinessController != null &&
                    m_menuManager != null &&
-                   m_readinessController.IsReady &&
-                   m_readinessController.CurrentConfig != null;
+                   m_readinessController.CanAttemptNaming;
         }
 
         public bool TryCancelPending()
         {
-            if (!m_session.IsRequestActive)
+            if (!m_activeOperationId.HasValue || string.IsNullOrEmpty(m_activeRequestId))
             {
                 return false;
             }
 
-            var requestId = m_session.ActiveRequestId;
-            var operationId = m_activeOperationId;
-            var canceled = m_session.TryFail(requestId);
-            if (operationId.HasValue)
-            {
-                m_uiInference?.RemoveRemoteLabel(operationId.Value);
-                if (m_activeOperationId == operationId)
-                {
-                    m_activeOperationId = null;
-                }
-            }
-            PublishPresentation();
-            return canceled;
+            return TryTerminateOperation(
+                m_activeRequestId,
+                m_activeOperationId.Value,
+                RemoteNamingFailureKind.Canceled,
+                true);
         }
 
         private IEnumerator SendNameRequest(
@@ -136,62 +174,166 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 request.SetRequestHeader("Authorization", $"Bearer {config.BearerToken}");
                 request.timeout = config.RequestTimeoutSeconds;
 
-                yield return request.SendWebRequest();
-
-                var succeeded = request.result == UnityWebRequest.Result.Success &&
-                                RemoteNameProtocol.IsSuccessfulHttpStatus(request.responseCode);
-                if (succeeded &&
-                    RemoteNameProtocol.TryParse(request.downloadHandler.text, out var response) &&
-                    m_session.IsRequestActive &&
-                    m_session.ActiveRequestId == requestId &&
-                    response.RequestId == requestId)
+                if (!TryAttachLiveRequest(requestId, operationId, request))
                 {
-                    if (response.Found)
-                    {
-                        if (!m_uiInference.CommitRemoteLabel(operationId, response.Name) ||
-                            !m_session.TryAccept(response, Time.realtimeSinceStartup))
-                        {
-                            FailOperation(requestId, operationId);
-                            yield break;
-                        }
-
-                        if (m_activeOperationId == operationId)
-                        {
-                            m_activeOperationId = null;
-                        }
-                        PublishPresentation();
-                        yield break;
-                    }
-
-                    m_session.TryAccept(response, Time.realtimeSinceStartup);
-                    if (m_session.IsRequestActive)
-                    {
-                        FailOperation(requestId, operationId);
-                        yield break;
-                    }
-
-                    m_uiInference.RemoveRemoteLabel(operationId);
-                    if (m_activeOperationId == operationId)
-                    {
-                        m_activeOperationId = null;
-                    }
-                    PublishPresentation();
                     yield break;
                 }
-            }
 
-            FailOperation(requestId, operationId);
+                var startedAt = Time.realtimeSinceStartup;
+                yield return request.SendWebRequest();
+
+                var elapsedSeconds = Time.realtimeSinceStartup - startedAt;
+                if (!TryDetachLiveRequest(requestId, operationId, request))
+                {
+                    yield break;
+                }
+
+                var transportFailure = RemoteNamingTransportClassifier.Classify(
+                    request.result,
+                    request.responseCode,
+                    elapsedSeconds,
+                    config.RequestTimeoutSeconds);
+                if (transportFailure != RemoteNamingFailureKind.None)
+                {
+                    TryTerminateOperation(
+                        requestId,
+                        operationId,
+                        transportFailure,
+                        false);
+                    yield break;
+                }
+
+                if (!RemoteNameProtocol.IsSuccessfulHttpStatus(request.responseCode))
+                {
+                    var parsedError = RemoteNameProtocol.TryParseError(
+                        request.responseCode,
+                        request.downloadHandler.text,
+                        requestId,
+                        out var failure);
+                    TryTerminateOperation(
+                        requestId,
+                        operationId,
+                        parsedError ? failure : RemoteNamingFailureKind.InvalidResponse,
+                        false);
+                    yield break;
+                }
+
+                if (!RemoteNameProtocol.TryParse(request.downloadHandler.text, out var response) ||
+                    response.RequestId != requestId)
+                {
+                    TryTerminateOperation(
+                        requestId,
+                        operationId,
+                        RemoteNamingFailureKind.InvalidResponse,
+                        false);
+                    yield break;
+                }
+
+                if (!response.Found)
+                {
+                    TryTerminateOperation(
+                        requestId,
+                        operationId,
+                        RemoteNamingFailureKind.NotFound,
+                        false);
+                    yield break;
+                }
+
+                if (!IsActiveTuple(requestId, operationId))
+                {
+                    yield break;
+                }
+
+                if (!m_uiInference.CommitRemoteLabel(operationId, response.Name) ||
+                    !m_session.TryAccept(response, Time.realtimeSinceStartup))
+                {
+                    TryTerminateOperation(
+                        requestId,
+                        operationId,
+                        RemoteNamingFailureKind.InvalidResponse,
+                        false);
+                    yield break;
+                }
+
+                m_activeRequestId = null;
+                m_activeOperationId = null;
+                PublishPresentation();
+            }
         }
 
-        private void FailOperation(string requestId, Guid operationId)
+        private bool TryAttachLiveRequest(
+            string requestId,
+            Guid operationId,
+            UnityWebRequest request)
         {
-            m_uiInference?.RemoveRemoteLabel(operationId);
-            m_session.TryFail(requestId);
-            if (m_activeOperationId == operationId)
+            if (!IsActiveTuple(requestId, operationId) ||
+                request == null ||
+                m_liveRequest != null)
             {
-                m_activeOperationId = null;
+                return false;
             }
+
+            m_liveRequest = request;
+            return true;
+        }
+
+        private bool TryDetachLiveRequest(
+            string requestId,
+            Guid operationId,
+            UnityWebRequest request)
+        {
+            if (!IsActiveTuple(requestId, operationId) ||
+                !ReferenceEquals(m_liveRequest, request))
+            {
+                return false;
+            }
+
+            m_liveRequest = null;
+            return true;
+        }
+
+        private bool IsActiveTuple(string requestId, Guid operationId)
+        {
+            return m_session.IsRequestActive &&
+                   m_session.ActiveRequestId == requestId &&
+                   m_activeRequestId == requestId &&
+                   m_activeOperationId == operationId;
+        }
+
+        private bool TryTerminateOperation(
+            string requestId,
+            Guid operationId,
+            RemoteNamingFailureKind failure,
+            bool abortTransport)
+        {
+            if (!IsActiveTuple(requestId, operationId))
+            {
+                return false;
+            }
+
+            var transitioned = failure == RemoteNamingFailureKind.Canceled
+                ? m_session.TryCancel(requestId)
+                : m_session.TryFail(requestId, failure, Time.realtimeSinceStartup);
+            if (!transitioned)
+            {
+                return false;
+            }
+
+            var request = m_liveRequest;
+            m_activeRequestId = null;
+            m_activeOperationId = null;
+            m_liveRequest = null;
+            m_uiInference?.RemoveRemoteLabel(operationId);
             PublishPresentation();
+            m_readinessController?.ReportNamingFailure(failure);
+
+            if (abortTransport && request != null)
+            {
+                request.Abort();
+                request.Dispose();
+            }
+
+            return true;
         }
 
         private static bool TryCaptureJpeg(Texture frame, out byte[] jpeg)
@@ -253,7 +395,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 }
                 if (cpuTexture != null)
                 {
-                    Destroy(cpuTexture);
+                    if (Application.isPlaying)
+                    {
+                        Destroy(cpuTexture);
+                    }
+                    else
+                    {
+                        DestroyImmediate(cpuTexture);
+                    }
                 }
             }
         }
@@ -267,6 +416,41 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             m_lastPublishedPresentation = m_session.PresentationText;
             m_menuManager.SetRemoteRecognitionPresentation(m_lastPublishedPresentation);
+        }
+    }
+
+    /// <summary>
+    /// Classifies Unity transport outcomes without inspecting free-form error text.
+    /// </summary>
+    public static class RemoteNamingTransportClassifier
+    {
+        /// <summary>
+        /// Distinguishes an elapsed zero-status deadline from earlier connectivity loss.
+        /// </summary>
+        public static RemoteNamingFailureKind Classify(
+            UnityWebRequest.Result result,
+            long statusCode,
+            float elapsedSeconds,
+            float deadlineSeconds)
+        {
+            if (result == UnityWebRequest.Result.DataProcessingError)
+            {
+                return RemoteNamingFailureKind.InvalidResponse;
+            }
+
+            if (result != UnityWebRequest.Result.ConnectionError)
+            {
+                return RemoteNamingFailureKind.None;
+            }
+
+            if (statusCode != 0)
+            {
+                return RemoteNamingFailureKind.InvalidResponse;
+            }
+
+            return elapsedSeconds >= deadlineSeconds
+                ? RemoteNamingFailureKind.Timeout
+                : RemoteNamingFailureKind.Connectivity;
         }
     }
 }

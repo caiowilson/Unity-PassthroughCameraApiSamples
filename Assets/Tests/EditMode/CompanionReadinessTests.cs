@@ -2,6 +2,7 @@ using NUnit.Framework;
 using PassthroughCameraSamples.MultiObjectDetection;
 using UnityEditor;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace ObjectTagger.Tests.EditMode
 {
@@ -101,6 +102,68 @@ namespace ObjectTagger.Tests.EditMode
             Assert.IsTrue(laterProbe.IsReady);
         }
 
+        [TestCase(RemoteNamingFailureKind.Authentication, CompanionReadinessKind.Misconfigured)]
+        [TestCase(RemoteNamingFailureKind.Connectivity, CompanionReadinessKind.Unavailable)]
+        [TestCase(RemoteNamingFailureKind.ModelUnavailable, CompanionReadinessKind.Unavailable)]
+        public void NamingAvailabilityFailuresDowngradeAndHealthCanRestoreReady(
+            RemoteNamingFailureKind failure,
+            CompanionReadinessKind expectedKind)
+        {
+            var fixture = new GameObject("ReadinessFailureFixture");
+            try
+            {
+                var label = fixture.AddComponent<Text>();
+                var menu = fixture.AddComponent<DetectionUiMenuManager>();
+                var menuObject = new SerializedObject(menu);
+                menuObject.FindProperty("m_labelInformation").objectReferenceValue = label;
+                menuObject.ApplyModifiedPropertiesWithoutUndo();
+                var controller = fixture.AddComponent<CompanionReadinessController>();
+                InvokePrivate(controller, "Awake");
+
+                InvokePrivate(controller, "Publish", CompanionReadiness.Ready());
+                controller.ReportNamingFailure(failure);
+
+                Assert.AreEqual(expectedKind, controller.Current.Kind);
+                Assert.IsFalse(controller.IsReady);
+                Assert.AreEqual(controller.Current.Message, label.text);
+
+                InvokePrivate(controller, "Publish", CompanionReadiness.Ready());
+                Assert.AreEqual(CompanionReadinessKind.Ready, controller.Current.Kind);
+                Assert.IsTrue(label.text.Contains("Mac: ready"));
+            }
+            finally
+            {
+                Object.DestroyImmediate(fixture);
+            }
+        }
+
+        [TestCase(RemoteNamingFailureKind.None)]
+        [TestCase(RemoteNamingFailureKind.Canceled)]
+        [TestCase(RemoteNamingFailureKind.Timeout)]
+        [TestCase(RemoteNamingFailureKind.Busy)]
+        [TestCase(RemoteNamingFailureKind.NotFound)]
+        [TestCase(RemoteNamingFailureKind.InvalidPayload)]
+        [TestCase(RemoteNamingFailureKind.InvalidResponse)]
+        public void OtherNamingFailuresLeaveReadyObservationUnchanged(RemoteNamingFailureKind failure)
+        {
+            var fixture = new GameObject("ReadinessFailureFixture");
+            try
+            {
+                var controller = fixture.AddComponent<CompanionReadinessController>();
+                InvokePrivate(controller, "Awake");
+                InvokePrivate(controller, "Publish", CompanionReadiness.Ready());
+
+                controller.ReportNamingFailure(failure);
+
+                Assert.AreEqual(CompanionReadinessKind.Ready, controller.Current.Kind);
+                Assert.IsTrue(controller.Current.IsReady);
+            }
+            finally
+            {
+                Object.DestroyImmediate(fixture);
+            }
+        }
+
         [TestCase("loading", CompanionReadinessKind.Loading)]
         [TestCase("error", CompanionReadinessKind.Unavailable)]
         public void StateMachineLeavesReadyForLaterHealthObservations(string status, CompanionReadinessKind expectedKind)
@@ -132,6 +195,16 @@ namespace ObjectTagger.Tests.EditMode
         public void PlayerAllowsTrustedLanHttpForTheCompanionProtocol()
         {
             Assert.AreEqual(InsecureHttpOption.AlwaysAllowed, PlayerSettings.insecureHttpOption);
+        }
+
+        private static object InvokePrivate(object instance, string methodName, params object[] arguments)
+        {
+            var method = instance.GetType().GetMethod(
+                methodName,
+                System.Reflection.BindingFlags.Instance |
+                System.Reflection.BindingFlags.NonPublic);
+            Assert.IsNotNull(method, $"Missing private method {methodName}");
+            return method.Invoke(instance, arguments);
         }
     }
 }

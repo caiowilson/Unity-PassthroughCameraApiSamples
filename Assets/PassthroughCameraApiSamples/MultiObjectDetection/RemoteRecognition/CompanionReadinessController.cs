@@ -13,10 +13,32 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private readonly CompanionReadinessStateMachine m_stateMachine = new CompanionReadinessStateMachine();
         private DetectionUiMenuManager m_menuManager;
+        private bool m_hasObservedReady;
 
         public CompanionReadiness Current => m_stateMachine.Current;
         public bool IsReady => Current.IsReady && CurrentConfig != null;
+
+        // A naming result may downgrade the displayed status without blocking
+        // the user's explicit retry after configuration and health were proven.
+        internal bool CanAttemptNaming => CurrentConfig != null && m_hasObservedReady;
         public RemoteRecognitionConfig CurrentConfig { get; private set; }
+
+        /// <summary>
+        /// Applies only naming failures that immediately invalidate companion readiness.
+        /// </summary>
+        public void ReportNamingFailure(RemoteNamingFailureKind failure)
+        {
+            switch (failure)
+            {
+                case RemoteNamingFailureKind.Authentication:
+                    Publish(CompanionReadiness.AuthenticationFailed());
+                    break;
+                case RemoteNamingFailureKind.Connectivity:
+                case RemoteNamingFailureKind.ModelUnavailable:
+                    Publish(CompanionReadiness.Unavailable());
+                    break;
+            }
+        }
 
         private void Awake()
         {
@@ -98,7 +120,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void Publish(CompanionReadiness observation)
         {
-            m_menuManager?.SetCompanionReadiness(m_stateMachine.Apply(observation));
+            var current = m_stateMachine.Apply(observation);
+            if (current.IsReady)
+            {
+                m_hasObservedReady = true;
+            }
+            m_menuManager?.SetCompanionReadiness(current);
         }
     }
 }

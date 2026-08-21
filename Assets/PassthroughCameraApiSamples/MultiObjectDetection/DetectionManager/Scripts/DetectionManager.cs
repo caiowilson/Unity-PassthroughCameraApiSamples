@@ -43,7 +43,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             OVRManager.TrackingAcquired -= OnTrackingAcquired;
         }
 
-        private void OnTrackingLost() => m_isHeadsetTracking = false;
+        private void OnTrackingLost()
+        {
+            m_isHeadsetTracking = false;
+            m_remoteNaming?.TryCancelPending();
+        }
         private void OnTrackingAcquired() => m_isHeadsetTracking = true;
 
         // Object Tagger manual-tagging Task 4 — A commits the live
@@ -66,13 +70,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // this frame share one physical-camera/depth sample.
             UpdateAimReticle();
 
+            var anchorTracked = m_spatialAnchor != null && m_spatialAnchor.IsTracked;
+            HandleRemoteAvailability(
+                anchorTracked,
+                m_uiMenuManager == null || m_uiMenuManager.IsPaused);
+
             if (wasStartedAtFrameStart &&
                 m_uiMenuManager != null &&
                 RemoteNamingInputPolicy.CanStartResolvedAim(
                     m_cameraAccess.IsPlaying,
                     m_uiMenuManager.IsPaused,
                     m_wasPausedLastFrame,
-                    m_spatialAnchor != null && m_spatialAnchor.IsTracked,
+                    anchorTracked,
                     m_currentAimFrame.HasResolvedTarget) &&
                 InputManager.IsButtonADownOrPinchStarted())
             {
@@ -92,7 +101,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 m_cameraAccess != null && m_cameraAccess.IsPlaying,
                 m_uiMenuManager == null || m_uiMenuManager.IsPaused,
                 m_wasPausedLastFrame,
-                m_remoteNaming != null && m_remoteNaming.IsReady);
+                m_remoteNaming != null && m_remoteNaming.CanAttemptNaming);
 
             var viewer = m_aimReticle != null ? m_aimReticle.transform.parent : null;
             var viewerPosition = viewer != null ? viewer.position : transform.position;
@@ -149,8 +158,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             {
                 if (!m_bClearAllFired && InputHoldClassification.HasReachedHoldThreshold(m_bPressStartTime, Time.time, HoldToClearAllThresholdSeconds))
                 {
-                    m_remoteNaming?.TryCancelPending();
-                    m_uiInference.ClearAnnotations();
+                    HandleHeldBClear();
                     m_bClearAllFired = true;
                 }
             }
@@ -159,13 +167,32 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // Released.
                 if (!m_bClearAllFired)
                 {
-                    var canceledPending = m_remoteNaming != null && m_remoteNaming.TryCancelPending();
-                    if (!canceledPending)
-                    {
-                        m_uiInference.TryUntagNearestToCenter();
-                    }
+                    HandleQuickBRelease();
                 }
                 m_bIsHeld = false;
+            }
+        }
+
+        private void HandleQuickBRelease()
+        {
+            var canceledPending = m_remoteNaming != null && m_remoteNaming.TryCancelPending();
+            if (!canceledPending)
+            {
+                m_uiInference?.TryUntagNearestToCenter();
+            }
+        }
+
+        private void HandleHeldBClear()
+        {
+            m_remoteNaming?.TryCancelPending();
+            m_uiInference?.ClearAnnotations();
+        }
+
+        private void HandleRemoteAvailability(bool anchorTracked, bool appPaused)
+        {
+            if (!anchorTracked || appPaused)
+            {
+                m_remoteNaming?.TryCancelPending();
             }
         }
 

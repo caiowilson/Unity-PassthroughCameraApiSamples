@@ -299,7 +299,7 @@ namespace ObjectTagger.Tests.EditMode
         }
 
         [UnityTest]
-        public IEnumerator MismatchedNotFoundResponseFailsOperationAndAllowsLaterRequest()
+        public IEnumerator MismatchedNotFoundResponseIsInvalidAndAllowsLaterRequest()
         {
             var fixtureRoot = new GameObject("RemoteNamingResponseFixture");
             fixtureRoot.SetActive(false);
@@ -341,6 +341,7 @@ namespace ObjectTagger.Tests.EditMode
                 var requestId = operationId.ToString("N");
                 var session = GetPrivateField<RemoteNamingSession>(controller, "m_session");
                 Assert.IsTrue(session.TryBegin(true, false, requestId));
+                SetPrivateField(controller, "m_activeRequestId", requestId);
                 SetPrivateField(controller, "m_activeOperationId", operationId);
                 Assert.IsTrue(manager.CreatePendingRemoteLabel(operationId, Vector3.one));
 
@@ -373,7 +374,7 @@ namespace ObjectTagger.Tests.EditMode
                 server.Completion.GetAwaiter().GetResult();
 
                 Assert.IsFalse(session.IsRequestActive);
-                Assert.IsNull(session.PresentationText);
+                Assert.AreEqual("Couldn’t identify — try again", session.PresentationText);
                 Assert.IsFalse(
                     contentObject.transform.Cast<Transform>().Any(child => child.gameObject.activeSelf));
                 Assert.IsTrue(session.TryBegin(true, false, "later-request"));
