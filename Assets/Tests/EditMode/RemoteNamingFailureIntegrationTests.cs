@@ -374,23 +374,66 @@ namespace ObjectTagger.Tests.EditMode
         }
 
         [Test]
-        public void QuickAndHeldBApplyPendingFirstSemanticsToRealCards()
+        public void BPressImmediatelyCancelsPendingAndConsumesQuickRelease()
         {
             using (var fixture = new ControllerFixture())
             {
-                var committedId = Guid.NewGuid();
-                Assert.IsTrue(fixture.Manager.CreatePendingRemoteLabel(committedId, Vector3.forward));
-                Assert.IsTrue(fixture.Manager.CommitRemoteLabel(committedId, "kept object"));
-                fixture.BeginPendingOperation(Vector3.one);
+                fixture.CreateCommittedLabel("kept object", Vector3.forward);
+                var oldOperationId = fixture.BeginPendingOperation(Vector3.one);
+                var oldRequestId = oldOperationId.ToString("N");
 
-                fixture.InvokeDetectionManagerAction("HandleQuickBRelease");
+                fixture.InvokeDetectionManagerAction("HandleBPressStarted");
+
+                Assert.IsFalse(fixture.Session.IsRequestActive);
                 Assert.AreEqual(1, fixture.ActiveCardCount);
                 Assert.AreEqual("kept object", fixture.ActiveCardText);
+                Assert.IsFalse(fixture.Terminate(
+                    oldRequestId,
+                    oldOperationId,
+                    RemoteNamingFailureKind.InvalidResponse));
+                Assert.IsFalse(fixture.Manager.CommitRemoteLabel(oldOperationId, "late object"));
 
-                fixture.BeginPendingOperation(Vector3.right);
-                fixture.InvokeDetectionManagerAction("HandleHeldBClear");
+                fixture.InvokeDetectionManagerAction("HandleBRelease");
+
+                Assert.AreEqual(1, fixture.ActiveCardCount);
+                Assert.AreEqual("kept object", fixture.ActiveCardText);
+            }
+        }
+
+        [Test]
+        public void HeldBAfterPressCancellationClearsAtThresholdWithoutReleaseAction()
+        {
+            using (var fixture = new ControllerFixture())
+            {
+                fixture.CreateCommittedLabel("before hold", Vector3.forward);
+                fixture.BeginPendingOperation(Vector3.one);
+
+                fixture.InvokeDetectionManagerAction("HandleBPressStarted");
+                Assert.AreEqual(1, fixture.ActiveCardCount);
+
+                fixture.InvokeDetectionManagerAction("HandleBHoldThresholdReached");
                 Assert.AreEqual(0, fixture.ActiveCardCount);
                 Assert.IsFalse(fixture.Session.IsRequestActive);
+
+                fixture.CreateCommittedLabel("after threshold", Vector3.forward);
+                fixture.InvokeDetectionManagerAction("HandleBRelease");
+
+                Assert.AreEqual(1, fixture.ActiveCardCount);
+                Assert.AreEqual("after threshold", fixture.ActiveCardText);
+            }
+        }
+
+        [Test]
+        public void QuickBWithoutPendingStillRemovesNearestCommittedLabel()
+        {
+            using (var fixture = new ControllerFixture())
+            {
+                fixture.CreateCommittedLabel("remove me", Vector3.forward);
+
+                fixture.InvokeDetectionManagerAction("HandleBPressStarted");
+                fixture.InvokeDetectionManagerAction("HandleBRelease");
+
+                Assert.AreEqual(0, fixture.ActiveCardCount);
             }
         }
 
@@ -561,6 +604,10 @@ namespace ObjectTagger.Tests.EditMode
                 var managerObject = new GameObject("SentisInferenceUiManager");
                 managerObject.transform.SetParent(m_root.transform, false);
                 Manager = managerObject.AddComponent<SentisInferenceUiManager>();
+                SetPrivateField(
+                    Manager,
+                    "m_cameraPoseOverride",
+                    (Func<Pose?>)(() => new Pose(Vector3.zero, Quaternion.identity)));
                 var contentObject = new GameObject("Content", typeof(RectTransform));
                 contentObject.transform.SetParent(m_root.transform, false);
                 m_content = contentObject.transform;
@@ -624,6 +671,14 @@ namespace ObjectTagger.Tests.EditMode
                 SetPrivateField(Controller, "m_activeRequestId", requestId);
                 SetPrivateField(Controller, "m_activeOperationId", (Guid?)operationId);
                 Assert.IsTrue(Manager.CreatePendingRemoteLabel(operationId, point));
+                return operationId;
+            }
+
+            public Guid CreateCommittedLabel(string name, Vector3 point)
+            {
+                var operationId = Guid.NewGuid();
+                Assert.IsTrue(Manager.CreatePendingRemoteLabel(operationId, point));
+                Assert.IsTrue(Manager.CommitRemoteLabel(operationId, name));
                 return operationId;
             }
 

@@ -138,10 +138,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // rather than making the user release first to see anything happen.
         // m_bClearAllFired guards against ALSO firing a targeted untag on
         // release once clear-all has already fired for this press.
+        // m_bCanceledPendingOnPress similarly prevents quick release from
+        // reinterpreting an already-consumed cancellation as a targeted untag.
         private const float HoldToClearAllThresholdSeconds = 1f;
         private bool m_bIsHeld;
         private float m_bPressStartTime;
         private bool m_bClearAllFired;
+        private bool m_bCanceledPendingOnPress;
 
         private void UpdateBButtonHoldState()
         {
@@ -149,28 +152,45 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             if (isHeldNow && !m_bIsHeld)
             {
-                // Press started this frame.
-                m_bIsHeld = true;
-                m_bPressStartTime = Time.time;
-                m_bClearAllFired = false;
+                HandleBPressStarted();
             }
             else if (isHeldNow && m_bIsHeld)
             {
                 if (!m_bClearAllFired && InputHoldClassification.HasReachedHoldThreshold(m_bPressStartTime, Time.time, HoldToClearAllThresholdSeconds))
                 {
-                    HandleHeldBClear();
-                    m_bClearAllFired = true;
+                    HandleBHoldThresholdReached();
                 }
             }
             else if (!isHeldNow && m_bIsHeld)
             {
-                // Released.
-                if (!m_bClearAllFired)
-                {
-                    HandleQuickBRelease();
-                }
-                m_bIsHeld = false;
+                HandleBRelease();
             }
+        }
+
+        private void HandleBPressStarted()
+        {
+            m_bIsHeld = true;
+            m_bPressStartTime = Time.time;
+            m_bClearAllFired = false;
+            m_bCanceledPendingOnPress =
+                m_remoteNaming != null && m_remoteNaming.TryCancelPending();
+        }
+
+        private void HandleBHoldThresholdReached()
+        {
+            HandleHeldBClear();
+            m_bClearAllFired = true;
+        }
+
+        private void HandleBRelease()
+        {
+            if (!m_bClearAllFired && !m_bCanceledPendingOnPress)
+            {
+                HandleQuickBRelease();
+            }
+
+            m_bIsHeld = false;
+            m_bCanceledPendingOnPress = false;
         }
 
         private void HandleQuickBRelease()

@@ -18,6 +18,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [SerializeField] private EnvironmentRayCastSampleManager m_environmentRaycast;
         [SerializeField] private PassthroughCameraAccess m_cameraAccess;
 
+#if UNITY_EDITOR
+        // Keeps EditMode input tests at the external headset-pose boundary while
+        // exercising the real nearest-label selection and card removal path.
+        private Func<Pose?> m_cameraPoseOverride;
+#endif
+
         [SerializeField] private RectTransform m_detectionBoxPrefab;
         [Space(10)]
         public UnityEvent<int> OnObjectsDetected;
@@ -427,6 +433,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private bool TryGetCurrentCameraPose(out Pose pose)
         {
             pose = default;
+
+#if UNITY_EDITOR
+            if (m_cameraPoseOverride != null)
+            {
+                var overriddenPose = m_cameraPoseOverride();
+                if (overriddenPose.HasValue)
+                {
+                    pose = overriddenPose.Value;
+                    return true;
+                }
+
+                return false;
+            }
+#endif
 
             if (!m_cameraAccess.IsPlaying)
             {
