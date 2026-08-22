@@ -360,7 +360,7 @@ namespace ObjectTagger.Tests.EditMode
                 Assert.IsNotNull(sendNameRequest);
                 var requestRoutine = (IEnumerator)sendNameRequest.Invoke(
                     controller,
-                    new object[] { config, requestId, operationId, new byte[] { 1, 2, 3 } });
+                    new object[] { config, requestId, operationId, new byte[] { 1, 2, 3 }, null });
 
                 while (requestRoutine.MoveNext())
                 {

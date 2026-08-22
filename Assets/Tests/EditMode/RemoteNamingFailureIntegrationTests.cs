@@ -291,7 +291,7 @@ namespace ObjectTagger.Tests.EditMode
         }
 
         [UnityTest]
-        public IEnumerator EveryTerminalKindAllowsARealControllerRetry(
+        public IEnumerator EveryTerminalKindAllowsARetryExceptAuthenticationLockout(
             [ValueSource(nameof(TerminalFailures))] RemoteNamingFailureKind failure)
         {
             using (var fixture = new ControllerFixture())
@@ -326,6 +326,26 @@ namespace ObjectTagger.Tests.EditMode
                 Assert.That(
                     fixture.PanelText,
                     Does.Contain(fixture.Readiness.Current.Message));
+
+                // Ticket 08 (D3): Authentication is the one terminal kind that
+                // leaves configuration Misconfigured, which the new
+                // CanAttemptEitherPath gate excludes — a deliberate
+                // tightening over the prior sticky gate, which incorrectly
+                // allowed a retry during an actionable configuration
+                // lockout. Every other terminal kind still allows a real
+                // retry, exercised below.
+                if (failure == RemoteNamingFailureKind.Authentication)
+                {
+                    Assert.IsFalse(fixture.Controller.CanAttemptNaming);
+                    Assert.IsFalse(RemoteNamingInputPolicy.ShouldShowAimReticle(
+                        true,
+                        true,
+                        false,
+                        false,
+                        fixture.Controller.CanAttemptNaming));
+                    yield break;
+                }
+
                 Assert.IsTrue(fixture.Controller.CanAttemptNaming);
                 Assert.IsTrue(RemoteNamingInputPolicy.ShouldShowAimReticle(
                     true,
@@ -333,6 +353,30 @@ namespace ObjectTagger.Tests.EditMode
                     false,
                     false,
                     fixture.Controller.CanAttemptNaming));
+
+                // Ticket 08 (D1): ModelUnavailable/Connectivity downgrade
+                // readiness to Unavailable, so the retry itself routes to the
+                // on-headset fallback instead of the Mac —
+                // StartAtResolvedPoint checks IsReady, not
+                // CanAttemptEitherPath. This fixture never wires
+                // m_inferenceRunManager, so the fallback attempt fails safely
+                // the same way ConfigurationAloneEnablesAttemptEvenBeforeSuccessfulHealth
+                // exercises it; there is no Mac retry to observe here.
+                if (failure == RemoteNamingFailureKind.ModelUnavailable ||
+                    failure == RemoteNamingFailureKind.Connectivity)
+                {
+                    var fallbackFrame = new Texture2D(2, 2, TextureFormat.RGB24, false);
+                    try
+                    {
+                        Assert.IsFalse(fixture.Controller.TryStartAtResolvedPoint(fallbackFrame, Vector3.right));
+                    }
+                    finally
+                    {
+                        UnityEngine.Object.DestroyImmediate(fallbackFrame);
+                    }
+                    Assert.AreEqual(0, fixture.ActiveCardCount);
+                    yield break;
+                }
 
                 var frame = new Texture2D(2, 2, TextureFormat.RGB24, false);
                 try
@@ -405,22 +449,31 @@ namespace ObjectTagger.Tests.EditMode
         }
 
         [Test]
-        public void InitialAttemptRequiresConfigurationAndSuccessfulHealth()
+        public void ConfigurationAloneEnablesAttemptEvenBeforeSuccessfulHealth()
         {
             using (var fixture = new ControllerFixture(false))
             {
                 var frame = new Texture2D(2, 2, TextureFormat.RGB24, false);
                 try
                 {
+                    // Ticket 08 (D3): valid configuration alone is enough for
+                    // CanAttemptNaming/ShouldShowAimReticle now, even while
+                    // Loading — the on-headset fallback is what lets A/pinch
+                    // resolve a target before the companion has ever
+                    // answered. TryStartAtResolvedPoint still returns false
+                    // here, but now because this fixture never wires
+                    // m_inferenceRunManager, so the fallback path it routes
+                    // into fails safely rather than being gated out earlier.
                     Assert.AreEqual(CompanionReadinessKind.Loading, fixture.Readiness.Current.Kind);
-                    Assert.IsFalse(fixture.Controller.CanAttemptNaming);
-                    Assert.IsFalse(RemoteNamingInputPolicy.ShouldShowAimReticle(
+                    Assert.IsTrue(fixture.Controller.CanAttemptNaming);
+                    Assert.IsTrue(RemoteNamingInputPolicy.ShouldShowAimReticle(
                         true,
                         true,
                         false,
                         false,
                         fixture.Controller.CanAttemptNaming));
                     Assert.IsFalse(fixture.Controller.TryStartAtResolvedPoint(frame, Vector3.right));
+                    Assert.AreEqual(0, fixture.ActiveCardCount);
 
                     fixture.PublishReady();
                     Assert.IsTrue(fixture.Controller.CanAttemptNaming);
@@ -773,19 +826,24 @@ namespace ObjectTagger.Tests.EditMode
                     "SendNameRequest",
                     BindingFlags.Instance | BindingFlags.NonPublic);
                 Assert.IsNotNull(method);
+                // The trailing null is the ticket 08 frame parameter: no
+                // fixture using this helper wires m_inferenceRunManager, so
+                // TryRerouteToFallback's null-guard short-circuits before the
+                // frame is ever dereferenced.
                 return (IEnumerator)method.Invoke(
                     Controller,
-                    new object[] { config, requestId, operationId, new byte[] { 1, 2, 3 } });
+                    new object[] { config, requestId, operationId, new byte[] { 1, 2, 3 }, null });
             }
 
-            public bool ContinueAfterCapture(Guid operationId, byte[] jpeg)
+            public bool ContinueAfterCapture(Guid operationId, byte[] jpeg, Texture frame = null)
             {
                 return (bool)InvokePrivate(
                     Controller,
                     "ContinueAfterCapture",
                     operationId.ToString("N"),
                     operationId,
-                    jpeg);
+                    jpeg,
+                    frame);
             }
 
             public bool Terminate(

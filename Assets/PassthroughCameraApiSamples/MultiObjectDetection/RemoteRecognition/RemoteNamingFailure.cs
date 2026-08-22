@@ -46,4 +46,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
         }
     }
+
+    // Ticket 08 (D2): a remote transport failure or timeout may hand the
+    // in-flight capture to one local YOLO attempt. Everything else —
+    // configuration/authentication/protocol errors, invalid input, and a
+    // valid "not found" — stays an actionable error and never falls back.
+    public static class RemoteNamingFallbackEligibility
+    {
+        public static bool IsEligible(RemoteNamingFailureKind kind)
+        {
+            return kind == RemoteNamingFailureKind.Timeout ||
+                   kind == RemoteNamingFailureKind.Connectivity ||
+                   kind == RemoteNamingFailureKind.ModelUnavailable;
+        }
+    }
 }

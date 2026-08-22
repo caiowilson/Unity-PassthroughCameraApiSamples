@@ -13,14 +13,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private readonly CompanionReadinessStateMachine m_stateMachine = new CompanionReadinessStateMachine();
         private DetectionUiMenuManager m_menuManager;
-        private bool m_hasObservedReady;
 
         public CompanionReadiness Current => m_stateMachine.Current;
         public bool IsReady => Current.IsReady && CurrentConfig != null;
 
-        // A naming result may downgrade the displayed status without blocking
-        // the user's explicit retry after configuration and health were proven.
-        internal bool CanAttemptNaming => CurrentConfig != null && m_hasObservedReady;
+        // Ticket 08 (D3): replaces the prior sticky "observed Ready once" gate.
+        // A valid configuration is enough to attempt naming — over the Mac
+        // path when Ready, or the on-headset fallback otherwise — provided the
+        // current state is not an actionable configuration error. This is what
+        // lets A/pinch resolve a target and fall back even when the companion
+        // has never once answered.
+        internal bool CanAttemptEitherPath =>
+            CurrentConfig != null && Current.Kind != CompanionReadinessKind.Misconfigured;
         public RemoteRecognitionConfig CurrentConfig { get; private set; }
 
         /// <summary>
@@ -121,10 +125,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private void Publish(CompanionReadiness observation)
         {
             var current = m_stateMachine.Apply(observation);
-            if (current.IsReady)
-            {
-                m_hasObservedReady = true;
-            }
             m_menuManager?.SetCompanionReadiness(current);
         }
     }

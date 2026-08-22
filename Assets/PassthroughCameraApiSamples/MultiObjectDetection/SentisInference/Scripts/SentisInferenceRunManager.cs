@@ -348,6 +348,80 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_uiInference.DrawUIBoxes(m_detections, m_inputSize, cachedCameraPose);
         }
 
+        // Ticket 08 (D4): the on-headset YOLO fallback. Reuses the already-warm
+        // m_engine (loaded in Awake regardless of this component's enabled
+        // state) and the same texture-to-tensor-to-NMS pipeline as
+        // RunInference, but against the frame RemoteNamingController already
+        // captured for the Mac attempt rather than a fresh camera grab. Runs
+        // exactly once per call — never loops, never schedules another cycle.
+        //
+        // D5: never touches camera pose, anchor tracking, or depth. The
+        // fallback commits at the world point already resolved for the
+        // capture; only the class label comes from this method.
+        //
+        // Uses a LOCAL detections list rather than the shared m_detections
+        // field: the continuous loop that owns m_detections stays disabled,
+        // and a one-shot call must not race it if it were ever re-enabled.
+        // virtual: RemoteNamingFailureIntegrationTests subclasses this to stand
+        // in for real Sentis inference (no InternalsVisibleTo in this project,
+        // and a real model load is too heavy for EditMode tests).
+        public virtual IEnumerator RunOneShotDetection(Texture frame, System.Action<string> onComplete)
+        {
+            if (m_modelLoadFailed || frame == null)
+            {
+                onComplete(null);
+                yield break;
+            }
+
+            var textureTransform = new TextureTransform().SetDimensions(frame.width, frame.height, 3);
+            using var input = new Tensor<float>(new TensorShape(1, 3, m_inputSize.x, m_inputSize.y));
+            TextureConverter.ToTensor(frame, input, textureTransform);
+
+            m_engine.Schedule(input);
+
+            var boxesAwaiter = (m_engine.PeekOutput(0) as Tensor<float>).ReadbackAndCloneAsync().GetAwaiter();
+            while (!boxesAwaiter.IsCompleted)
+            {
+                yield return null;
+            }
+            using var boxes = boxesAwaiter.GetResult();
+            if (boxes.shape[0] == 0)
+            {
+                onComplete(null);
+                yield break;
+            }
+
+            var classIDsAwaiter = (m_engine.PeekOutput(1) as Tensor<int>).ReadbackAndCloneAsync().GetAwaiter();
+            while (!classIDsAwaiter.IsCompleted)
+            {
+                yield return null;
+            }
+            using var classIDs = classIDsAwaiter.GetResult();
+            if (classIDs.shape[0] == 0)
+            {
+                onComplete(null);
+                yield break;
+            }
+
+            var scoresAwaiter = (m_engine.PeekOutput(2) as Tensor<float>).ReadbackAndCloneAsync().GetAwaiter();
+            while (!scoresAwaiter.IsCompleted)
+            {
+                yield return null;
+            }
+            using var scores = scoresAwaiter.GetResult();
+            if (scores.shape[0] == 0)
+            {
+                onComplete(null);
+                yield break;
+            }
+
+            var detections = new List<(int classId, Vector4 boundingBox, float score)>();
+            NonMaxSuppression(detections, boxes, classIDs, scores, m_iouThreshold, m_scoreThreshold, m_maxAcceptedDetections, GetAllowedClassIds());
+
+            var nearestIndex = DetectionCentering.IndexNearestCenter(detections, m_inputSize);
+            onComplete(nearestIndex < 0 ? null : m_uiInference.ClassNameFor(detections[nearestIndex].classId));
+        }
+
         // Object Tagger slice 3 Task 3: this is now a THIN ADAPTER.
         //
         // It does the one thing that genuinely needs Inference Engine types — unwrap the

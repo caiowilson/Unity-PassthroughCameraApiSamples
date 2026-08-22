@@ -14,6 +14,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [SerializeField] private DetectionUiMenuManager m_menuManager;
         [SerializeField] private SentisInferenceUiManager m_uiInference;
 
+        // Ticket 08 (D4): the already-warm Sentis engine used for the one-shot
+        // on-headset fallback. Null in scenes/fixtures that predate this
+        // ticket, or in the physical-gate wiring not yet done in-editor — see
+        // TryStartFallback/TryRerouteToFallback, both of which no-op safely
+        // when this is unset.
+        [SerializeField] private SentisInferenceRunManager m_inferenceRunManager;
+
         private readonly RemoteNamingSession m_session = new RemoteNamingSession();
         private string m_activeRequestId;
         private Guid? m_activeOperationId;
@@ -21,13 +28,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private string m_lastPublishedPresentation;
 
         /// <summary>
-        /// Whether the user may make a deliberate naming attempt. This stays true
-        /// across naming-result readiness downgrades after health was once ready.
+        /// Whether the user may make a deliberate naming attempt — over the Mac
+        /// path when the companion is Ready, or the on-headset fallback
+        /// otherwise. Ticket 08 (D3): true whenever configuration is valid and
+        /// not in an actionable Misconfigured state, even if the companion has
+        /// never once answered — see CompanionReadinessController.CanAttemptEitherPath.
         /// </summary>
         public bool CanAttemptNaming =>
             isActiveAndEnabled &&
             m_readinessController != null &&
-            m_readinessController.CanAttemptNaming;
+            m_readinessController.CanAttemptEitherPath;
 
         private void Update()
         {
@@ -85,7 +95,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             var operationId = Guid.NewGuid();
             var requestId = operationId.ToString("N");
             if (!m_session.TryBegin(
-                    m_readinessController.CanAttemptNaming,
+                    m_readinessController.CanAttemptEitherPath,
                     m_menuManager.IsPaused,
                     requestId))
             {
@@ -106,15 +116,24 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 return false;
             }
 
-            if (!TryCaptureJpeg(frame, out var jpeg))
+            // Ticket 08 (item 1): the companion not being Ready at capture
+            // time (Loading or Unavailable — Misconfigured is excluded by
+            // CanAttemptEitherPath above) goes straight to the one-shot
+            // fallback. It never attempts the Mac send at all.
+            if (!m_readinessController.IsReady)
             {
-                return ContinueAfterCapture(requestId, operationId, null);
+                return TryStartFallback(requestId, operationId, frame);
             }
 
-            return ContinueAfterCapture(requestId, operationId, jpeg);
+            if (!TryCaptureJpeg(frame, out var jpeg))
+            {
+                return ContinueAfterCapture(requestId, operationId, null, frame);
+            }
+
+            return ContinueAfterCapture(requestId, operationId, jpeg, frame);
         }
 
-        private bool ContinueAfterCapture(string requestId, Guid operationId, byte[] jpeg)
+        private bool ContinueAfterCapture(string requestId, Guid operationId, byte[] jpeg, Texture frame)
         {
             if (jpeg == null || jpeg.Length == 0 || jpeg.Length > MaximumJpegBytes)
             {
@@ -130,8 +149,106 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 m_readinessController.CurrentConfig,
                 requestId,
                 operationId,
-                jpeg));
+                jpeg,
+                frame));
             return true;
+        }
+
+        // Ticket 08: kicks off the one-shot on-headset fallback for an
+        // operation whose pending card already exists. Fails safely (cleaning
+        // up the pending card and session state, exactly like a capture
+        // failure) when no inference engine is wired — the physical-gate
+        // scene wiring for m_inferenceRunManager is a separate, deferred step.
+        private bool TryStartFallback(string requestId, Guid operationId, Texture frame)
+        {
+            if (m_inferenceRunManager == null)
+            {
+                TryTerminateOperation(
+                    requestId,
+                    operationId,
+                    RemoteNamingFailureKind.InvalidResponse,
+                    false);
+                return false;
+            }
+
+            StartCoroutine(AttemptFallback(requestId, operationId, frame));
+            return true;
+        }
+
+        // Ticket 08 (item 2): reroutes a fallback-eligible remote failure to
+        // the same one-shot fallback, reusing the in-flight operation's frame
+        // and pending card rather than tearing them down first. Returns false
+        // (no-op) for every non-eligible kind, an unwired inference manager,
+        // or an operation that is no longer the active tuple — callers fall
+        // through to the ordinary TryTerminateOperation in every such case.
+        private bool TryRerouteToFallback(
+            string requestId,
+            Guid operationId,
+            Texture frame,
+            RemoteNamingFailureKind failureKind,
+            bool abortTransport)
+        {
+            if (!RemoteNamingFallbackEligibility.IsEligible(failureKind) ||
+                m_inferenceRunManager == null ||
+                !IsActiveTuple(requestId, operationId))
+            {
+                return false;
+            }
+
+            var request = m_liveRequest;
+            m_liveRequest = null;
+            if (abortTransport && request != null)
+            {
+                request.Abort();
+                request.Dispose();
+            }
+
+            // Matches TryTerminateOperation's own readiness reporting for the
+            // same failure kind, without tearing down the session/card state
+            // TryTerminateOperation would also clear — the operation stays
+            // active while the fallback attempt runs.
+            m_readinessController?.ReportNamingFailure(failureKind);
+
+            StartCoroutine(AttemptFallback(requestId, operationId, frame));
+            return true;
+        }
+
+        // Ticket 08: runs exactly one Quest-local YOLO inference over the
+        // already-captured frame and commits its class label at the point
+        // already resolved for this operation (D5 — no repeated spatial
+        // resolution). Re-checks IsActiveTuple after the inference completes
+        // so a cancellation or supersession while it ran prevents the
+        // fallback from ever committing (item 2).
+        private IEnumerator AttemptFallback(string requestId, Guid operationId, Texture frame)
+        {
+            if (!IsActiveTuple(requestId, operationId))
+            {
+                yield break;
+            }
+
+            string className = null;
+            yield return m_inferenceRunManager.RunOneShotDetection(frame, result => className = result);
+
+            if (!IsActiveTuple(requestId, operationId))
+            {
+                yield break;
+            }
+
+            if (className == null ||
+                !m_uiInference.CommitRemoteLabelFallback(operationId, className) ||
+                !m_session.TryAcceptFallback(requestId, className, Time.realtimeSinceStartup))
+            {
+                TryTerminateOperation(
+                    requestId,
+                    operationId,
+                    RemoteNamingFailureKind.NotFound,
+                    false);
+                yield break;
+            }
+
+            m_activeRequestId = null;
+            m_activeOperationId = null;
+            PublishPresentation();
         }
 
         private bool HasStartPrerequisites(Texture frame)
@@ -140,7 +257,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                    frame != null &&
                    m_readinessController != null &&
                    m_menuManager != null &&
-                   m_readinessController.CanAttemptNaming;
+                   m_readinessController.CanAttemptEitherPath;
         }
 
         public bool TryCancelPending()
@@ -161,7 +278,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             RemoteRecognitionConfig config,
             string requestId,
             Guid operationId,
-            byte[] jpeg)
+            byte[] jpeg,
+            Texture frame)
         {
             var sections = new List<IMultipartFormSection>(2)
             {
@@ -192,11 +310,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 var elapsedSeconds = Time.realtimeSinceStartupAsDouble - startedAt;
                 if (!operation.isDone)
                 {
-                    TryTerminateOperation(
-                        requestId,
-                        operationId,
-                        RemoteNamingFailureKind.Timeout,
-                        true);
+                    if (!TryRerouteToFallback(requestId, operationId, frame, RemoteNamingFailureKind.Timeout, true))
+                    {
+                        TryTerminateOperation(
+                            requestId,
+                            operationId,
+                            RemoteNamingFailureKind.Timeout,
+                            true);
+                    }
                     yield break;
                 }
 
@@ -212,11 +333,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     config.RequestTimeoutSeconds);
                 if (transportFailure != RemoteNamingFailureKind.None)
                 {
-                    TryTerminateOperation(
-                        requestId,
-                        operationId,
-                        transportFailure,
-                        false);
+                    if (!TryRerouteToFallback(requestId, operationId, frame, transportFailure, false))
+                    {
+                        TryTerminateOperation(
+                            requestId,
+                            operationId,
+                            transportFailure,
+                            false);
+                    }
                     yield break;
                 }
 
@@ -227,11 +351,15 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                         request.downloadHandler.text,
                         requestId,
                         out var failure);
-                    TryTerminateOperation(
-                        requestId,
-                        operationId,
-                        parsedError ? failure : RemoteNamingFailureKind.InvalidResponse,
-                        false);
+                    var kind = parsedError ? failure : RemoteNamingFailureKind.InvalidResponse;
+                    if (!TryRerouteToFallback(requestId, operationId, frame, kind, false))
+                    {
+                        TryTerminateOperation(
+                            requestId,
+                            operationId,
+                            kind,
+                            false);
+                    }
                     yield break;
                 }
 

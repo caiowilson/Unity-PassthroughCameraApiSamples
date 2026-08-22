@@ -549,6 +549,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return m_labels[classId];
         }
 
+        // Ticket 08: the same guarded lookup, exposed for the one-shot YOLO
+        // fallback (SentisInferenceRunManager.RunOneShotDetection), which
+        // resolves its winning detection's class name from outside this
+        // class. LabelFor itself stays private; existing reflection-based
+        // test lookups (BindingFlags.NonPublic) are unaffected.
+        public string ClassNameFor(int classId) => LabelFor(classId);
+
         public void SetLabels(TextAsset labelsAsset)
         {
             // Parse neural net labels
@@ -797,6 +804,28 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             var view = m_boxViews[viewIndex];
             if (!RemoteSpatialLabelLifecycle.TryCommit(view.Record, operationId, name))
+            {
+                return false;
+            }
+
+            view.Label.text = RemoteSpatialLabelLifecycle.PresentationFor(view.Record);
+            return true;
+        }
+
+        // Ticket 08: commits the pending card through the on-headset YOLO
+        // fallback instead of the Mac's response, marking the record as
+        // lower-capability. Mirrors CommitRemoteLabel exactly except for
+        // which lifecycle method performs the commit.
+        public bool CommitRemoteLabelFallback(Guid operationId, string className)
+        {
+            var viewIndex = FindRemoteViewIndex(operationId);
+            if (viewIndex < 0)
+            {
+                return false;
+            }
+
+            var view = m_boxViews[viewIndex];
+            if (!RemoteSpatialLabelLifecycle.TryCommitFallback(view.Record, operationId, className))
             {
                 return false;
             }

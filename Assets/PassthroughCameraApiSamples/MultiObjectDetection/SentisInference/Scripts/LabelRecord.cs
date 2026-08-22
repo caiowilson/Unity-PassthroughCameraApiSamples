@@ -41,5 +41,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         public Vector3 SmoothedPosition;
 
         public float LastAssociatedScore;
+
+        /// Ticket 08: set when this label was committed by the on-headset YOLO
+        /// fallback (a fixed, small vocabulary) rather than the Mac's free-form
+        /// naming. Drives the lower-capability presentation marker in
+        /// RemoteSpatialLabelLifecycle.PresentationFor.
+        public bool IsFallbackResult;
     }
 }

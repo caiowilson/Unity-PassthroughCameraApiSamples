@@ -65,6 +65,28 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return true;
         }
 
+        // Ticket 08: the on-headset YOLO fallback has no RemoteNameResponse to
+        // match against — it never talks to the Mac — so this mirrors
+        // TryAccept's success tail against the requestId alone, and composes
+        // the fallback marker into the transient status text itself so the
+        // panel reads as lower-capability the same way the committed label
+        // does (see RemoteSpatialLabelLifecycle.PresentationFor).
+        public bool TryAcceptFallback(string requestId, string className, float realtimeSinceStartup)
+        {
+            if (!IsRequestActive ||
+                ActiveRequestId != requestId ||
+                !RemoteNameProtocol.IsValidName(className))
+            {
+                return false;
+            }
+
+            ActiveRequestId = null;
+            m_state = SessionState.ShowingSuccess;
+            PresentationText = className + RemoteSpatialLabelLifecycle.FallbackMarker;
+            m_presentationExpiresAt = realtimeSinceStartup + SuccessPresentationSeconds;
+            return true;
+        }
+
         public bool TryCancel(string requestId)
         {
             if (!IsRequestActive || ActiveRequestId != requestId)
