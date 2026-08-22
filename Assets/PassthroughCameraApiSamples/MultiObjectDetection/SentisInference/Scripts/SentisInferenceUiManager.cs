@@ -464,17 +464,27 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return true;
         }
 
-        public bool TryResolveCenterPoint(out Vector3 point)
+        public bool TryResolveCenterPoint(out Vector3 point) =>
+            TryResolveCenterPoint(out point, out _);
+
+        /// Also returns the camera pose the depth ray was cast from, so a caller
+        /// that needs to project other viewport points this frame reuses the same
+        /// guarded pose instead of calling GetCameraPose() again. Calling it
+        /// unguarded can silently return a world-origin pose that is
+        /// indistinguishable from a real one -- see the comment above
+        /// TryGetCurrentCameraPose.
+        public bool TryResolveCenterPoint(out Vector3 point, out Pose cameraPose)
         {
             point = Vector3.zero;
+            cameraPose = default;
             if (m_environmentRaycast == null ||
                 m_cameraAccess == null ||
-                !TryGetCurrentCameraPose(out var cameraPose))
+                !TryGetCurrentCameraPose(out var pose))
             {
                 return false;
             }
 
-            var ray = m_cameraAccess.ViewportPointToRay(new Vector2(0.5f, 0.5f), cameraPose);
+            var ray = m_cameraAccess.ViewportPointToRay(new Vector2(0.5f, 0.5f), pose);
             var result = m_environmentRaycast.ResolveDepth(ray);
             if (!result.IsHit)
             {
@@ -482,6 +492,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
 
             point = result.Point;
+            cameraPose = pose;
             return true;
         }
 

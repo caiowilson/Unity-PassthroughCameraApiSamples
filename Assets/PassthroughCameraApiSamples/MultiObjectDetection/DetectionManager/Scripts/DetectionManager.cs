@@ -17,10 +17,23 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [SerializeField] private DetectionUiMenuManager m_uiMenuManager;
         [SerializeField] private RemoteNamingController m_remoteNaming;
         [SerializeField] private GameObject m_aimReticle;
+        [SerializeField] private GameObject m_cropSquare;
 
         private bool m_isStarted;
         private bool m_wasPausedLastFrame = true;
         private RemoteAimFrame m_currentAimFrame;
+        // The square's frame is held here rather than folded into RemoteAimFrame:
+        // this class already resolves the centre point once per frame, so both
+        // frames come from that one resolve and the dot's types stay untouched.
+        //
+        // The extent is cached against the resolution that produced it. It is a
+        // session constant (see RemoteCropSquarePlacement) but the camera
+        // restarts on application pause and may return at a different
+        // resolution, so the key is the resolution, not a bool.
+        private Vector2Int m_cropExtentResolution;
+        private Vector2 m_cropExtentPerMetre;
+        private bool m_hasCropExtent;
+        private bool m_loggedCropGeometry;
         internal OVRSpatialAnchor m_spatialAnchor;
         private bool m_isHeadsetTracking;
 
@@ -106,28 +119,114 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             var viewer = m_aimReticle != null ? m_aimReticle.transform.parent : null;
             var viewerPosition = viewer != null ? viewer.position : transform.position;
             var viewerRotation = viewer != null ? viewer.rotation : transform.rotation;
-            if (shouldShow &&
+
+            Vector3 targetPoint = default;
+            Pose cameraPose = default;
+            var resolved = shouldShow &&
                 m_uiInference != null &&
-                m_uiInference.TryResolveCenterPoint(out var targetPoint))
+                m_uiInference.TryResolveCenterPoint(out targetPoint, out cameraPose);
+
+            m_currentAimFrame = resolved
+                ? RemoteAimPlacement.Resolved(viewerPosition, targetPoint)
+                : RemoteAimPlacement.Fallback(viewerPosition, viewerRotation);
+
+            if (m_aimReticle != null)
             {
-                m_currentAimFrame = RemoteAimPlacement.Resolved(viewerPosition, targetPoint);
-            }
-            else
-            {
-                m_currentAimFrame = RemoteAimPlacement.Fallback(viewerPosition, viewerRotation);
+                m_aimReticle.transform.position = m_currentAimFrame.ReticleWorldPosition;
+                m_aimReticle.transform.localScale = Vector3.one * m_currentAimFrame.UniformScale;
+                if (m_aimReticle.activeSelf != shouldShow)
+                {
+                    m_aimReticle.SetActive(shouldShow);
+                }
             }
 
-            if (m_aimReticle == null)
+            UpdateCropSquare(resolved, cameraPose, targetPoint);
+        }
+
+        // The square is shown only when depth actually resolved. That is not a
+        // limitation but an affordance: CanStartResolvedAim already requires
+        // HasResolvedTarget, so A/pinch is a no-op without it. "Brackets visible"
+        // therefore means "the trigger will fire". The dot's own gating is
+        // deliberately left alone; it still shows in the unresolved state, a
+        // pre-existing inconsistency recorded as D3 in the design spec.
+        private void UpdateCropSquare(bool resolved, Pose cameraPose, Vector3 resolvedPoint)
+        {
+            if (m_cropSquare == null)
             {
                 return;
             }
 
-            m_aimReticle.transform.position = m_currentAimFrame.ReticleWorldPosition;
-            m_aimReticle.transform.localScale = Vector3.one * m_currentAimFrame.UniformScale;
-            if (m_aimReticle.activeSelf != shouldShow)
+            var shown = false;
+            if (resolved &&
+                m_cameraAccess != null &&
+                TryGetCropExtent(cameraPose, out var extentPerMetre) &&
+                RemoteCropSquarePlacement.TryFrame(
+                    cameraPose, resolvedPoint, extentPerMetre, out var square))
             {
-                m_aimReticle.SetActive(shouldShow);
+                m_cropSquare.transform.SetPositionAndRotation(square.Position, square.Rotation);
+                m_cropSquare.transform.localScale = square.LocalScale;
+                shown = true;
             }
+
+            if (m_cropSquare.activeSelf != shown)
+            {
+                m_cropSquare.SetActive(shown);
+            }
+        }
+
+        // Reads the intrinsics once per capture resolution. Doing this every
+        // frame would re-derive a number that cannot change, and would need the
+        // ray delegate live on the hot path.
+        private bool TryGetCropExtent(Pose cameraPose, out Vector2 extentPerMetre)
+        {
+            var resolution = m_cameraAccess.CurrentResolution;
+            if (m_hasCropExtent && m_cropExtentResolution == resolution)
+            {
+                extentPerMetre = m_cropExtentPerMetre;
+                return true;
+            }
+
+            extentPerMetre = default;
+            if (!RemoteImageCrop.TryCreatePlan(resolution.x, resolution.y, out var plan))
+            {
+                return false;
+            }
+
+            LogCropGeometryOnce(resolution, plan);
+            if (!RemoteCropSquarePlacement.TryMeasureExtentPerMetre(
+                    plan.NormalizedRect,
+                    cameraPose,
+                    viewportPoint => m_cameraAccess.ViewportPointToRay(viewportPoint, cameraPose),
+                    out var measured))
+            {
+                return false;
+            }
+
+            m_cropExtentPerMetre = measured;
+            m_cropExtentResolution = resolution;
+            m_hasCropExtent = true;
+            extentPerMetre = measured;
+            return true;
+        }
+
+        // The granted capture resolution has never been observed on this project
+        // -- every crop number to date, ticket 06's included, was read off
+        // PassthroughCameraAccessPrefab. The scene also carries stale
+        // requestedResolution/eye overrides from the superseded
+        // WebCamTextureManager API that make it read as 800x600 (D6). One log
+        // line settles both with evidence.
+        private void LogCropGeometryOnce(Vector2Int resolution, RemoteImageCropPlan plan)
+        {
+            if (m_loggedCropGeometry)
+            {
+                return;
+            }
+
+            m_loggedCropGeometry = true;
+            Debug.Log(
+                $"[ObjectTagger] camera resolution {resolution.x}x{resolution.y}, " +
+                $"crop {plan.SourceRect}, normalized {plan.NormalizedRect}, " +
+                $"output {plan.OutputSize.x}x{plan.OutputSize.y} q{plan.JpegQuality}");
         }
 
         // Object Tagger manual-tagging Task 4 — B-button/pinch hold-duration
