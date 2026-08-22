@@ -459,6 +459,55 @@ namespace ObjectTagger.Tests.EditMode
             }
         }
 
+        [Test]
+        public void ShippedSceneWiresTheCropSquareUnderTheSameAnchorAsTheDot()
+        {
+            const string scenePath =
+                "Assets/PassthroughCameraApiSamples/MultiObjectDetection/MultiObjectDetection.unity";
+            var scene = EditorSceneManager.OpenScene(scenePath, OpenSceneMode.Additive);
+
+            try
+            {
+                var square = scene.GetRootGameObjects()
+                    .SelectMany(root => root.GetComponentsInChildren<Transform>(true))
+                    .Single(transform => transform.name == "RemoteCropSquare");
+                var detectionManager = scene.GetRootGameObjects()
+                    .SelectMany(root => root.GetComponentsInChildren<MonoBehaviour>(true))
+                    .OfType<DetectionManager>()
+                    .Single();
+
+                // Same parent as RemoteAimReticle. The square is placed in world
+                // space every frame, so the parent only matters for the authored
+                // fallback -- but a DIFFERENT parent would mean the two overlays
+                // disagree about their fallback, which is a wiring mistake worth
+                // catching here.
+                Assert.AreEqual("CenterEyeAnchor", square.parent.name);
+                Assert.IsFalse(square.gameObject.activeSelf);
+
+                // Eight bracket arms: four corners, two arms each.
+                var arms = square.GetComponentsInChildren<UnityEngine.UI.Image>(true);
+                Assert.AreEqual(8, arms.Length);
+
+                // The prefab's authored edge must equal the constant the
+                // controller divides by, or every square is scaled wrong by
+                // exactly that ratio.
+                var rect = square.GetComponent<RectTransform>();
+                Assert.AreEqual(
+                    RemoteCropSquarePlacement.CanvasEdgeUnits, rect.sizeDelta.x, 0.0001f);
+                Assert.AreEqual(
+                    RemoteCropSquarePlacement.CanvasEdgeUnits, rect.sizeDelta.y, 0.0001f);
+
+                var serialized = new SerializedObject(detectionManager);
+                Assert.AreSame(
+                    square.gameObject,
+                    serialized.FindProperty("m_cropSquare").objectReferenceValue);
+            }
+            finally
+            {
+                EditorSceneManager.CloseScene(scene, true);
+            }
+        }
+
         private static T GetPrivateField<T>(object instance, string fieldName)
         {
             var field = instance.GetType().GetField(
