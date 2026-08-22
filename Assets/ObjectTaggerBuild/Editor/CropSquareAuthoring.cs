@@ -17,13 +17,45 @@ public static class CropSquareAuthoring
     // wrong by exactly that ratio.
     private const float RootEdgeUnits = 100f;
 
-    // Starting values, expressed as a fraction of the edge so they survive the
-    // uniform scaling. The crop tightened to 0.45, shrinking the square's
-    // angular size by a quarter, so stroke may need to go UP after the device
-    // pass. Change here and re-run; do not hand-edit the prefab.
-    private const float ArmLengthUnits = 25f;   // 25% of the edge
-    private const float StrokeUnits = 4f;       // 4% of the edge
-    private const float HaloOffsetUnits = 1.5f;
+    // Expressed as a fraction of the edge so they survive the uniform scaling.
+    //
+    // Tuned on device 2026-08-22. The bisection trial (crop 012) measured the
+    // operator reading the boundary ~5% of frame width INBOARD of the true
+    // crop edge, on the left edge and -- via the ticket's first trial -- the
+    // right edge too. Both edges inboard is a scaling signature, not the
+    // translation a lens-offset error would produce. The authored geometry was
+    // then proven correct: every arm's OUTER edge lands exactly on the
+    // boundary and RootEdgeUnits matches CanvasEdgeUnits, so the square really
+    // does enclose the crop. The bias is therefore in the reading, from two
+    // mechanisms: a 4-unit stroke put its visual centre 2 units inboard, and
+    // arms covering only 25% out from each corner left a 50-unit ink-free gap
+    // mid-edge with nothing to align against.
+    //
+    // Arms lengthened and stroke halved to attack both. Lengthening cannot
+    // move the boundary: BL_H becomes size (40,4) at offset (+20,+2), still
+    // spanning x in [0,40] with its outer edge at 0.
+    // Second pass, same session: at StrokeUnits 2f the halo still read thick,
+    // because Outline adds HaloOffsetUnits on BOTH sides -- the visible mark was
+    // 2 + 2*1.5 = 5 units, mostly halo. Halo now scaled with the stroke, so the
+    // mark is 1.5 + 2*0.75 = 3 units. Note the retune did NOT move the measured
+    // boundary offset (46.5 px -> 46.0 px), which is why D19 stopped tuning ink
+    // and went after the runtime extent instead.
+    // Third pass. The visible mark is stroke + 2*halo, because Outline extends
+    // it on BOTH sides. Converted to what the operator actually sees, against
+    // the square's 30.2 degree extent:
+    //
+    //   stroke 4,   halo 1.5   -> 7 units -> 2.10 deg   (shipped, "quite thick")
+    //   stroke 2,   halo 1.5   -> 5 units -> 1.50 deg   ("still quite thick")
+    //   stroke 1.5, halo 0.75  -> 3 units -> 0.91 deg   ("still pretty thick")
+    //   stroke 0.5, halo 0.25  -> 1 unit  -> 0.30 deg   (this pass)
+    //
+    // 0.91 deg is ~55 arcmin, about a little-finger width at arm's length. The
+    // first two passes were tuned in canvas units without checking the angle,
+    // which is why 30-40% steps felt like no change. Raise both together if the
+    // amber ever washes out; the halo must stay a fraction of the stroke.
+    private const float ArmLengthUnits = 40f;    // 40% of the edge; gap 20 units
+    private const float StrokeUnits = 0.5f;      // 0.5% of the edge
+    private const float HaloOffsetUnits = 0.25f; // half the stroke
 
     private static readonly Color ViewfinderAmber = new Color(1f, 0.7019608f, 0f, 1f);
     private static readonly Color Halo = new Color(0f, 0f, 0f, 0.75f);

@@ -33,6 +33,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private Vector2Int m_cropExtentResolution;
         private Vector2 m_cropExtentPerMetre;
         private bool m_hasCropExtent;
+        private bool m_loggedCropExtent;
         private bool m_loggedCropGeometry;
         internal OVRSpatialAnchor m_spatialAnchor;
         private bool m_isHeadsetTracking;
@@ -202,6 +203,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 return false;
             }
 
+            LogCropExtentOnce(resolution, plan, measured, cameraPose);
+
             m_cropExtentPerMetre = measured;
             m_cropExtentResolution = resolution;
             m_hasCropExtent = true;
@@ -227,6 +230,61 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 $"[ObjectTagger] camera resolution {resolution.x}x{resolution.y}, " +
                 $"crop {plan.SourceRect}, normalized {plan.NormalizedRect}, " +
                 $"output {plan.OutputSize.x}x{plan.OutputSize.y} q{plan.JpegQuality}");
+        }
+
+        // Diagnostic for the ~5%-per-side undersize measured on device
+        // 2026-08-22 (D19). Two trials, 012 and 017, put the operator's read of
+        // the bracket boundary 46.5 px and 46.0 px inboard of the true crop edge
+        // on a 896-wide crop -- unchanged across a rendering change, so the
+        // square really is smaller than the region it captures.
+        //
+        // The check that matters is LINEARITY. For a pinhole, a crop covering a
+        // fraction of the frame must subtend that same fraction of the frame's
+        // angle. If crop/full does not equal the normalized rect, then
+        // RemoteImageCrop and ViewportPointToRay disagree about what the
+        // normalized coordinates are relative to -- the delivered frame versus
+        // the sensor crop region -- and that is the bug. Every EditMode test
+        // feeds a synthetic pinhole at f=800, so none of them can see this.
+        private void LogCropExtentOnce(
+            Vector2Int resolution, RemoteImageCropPlan plan, Vector2 measured, Pose cameraPose)
+        {
+            if (m_loggedCropExtent)
+            {
+                return;
+            }
+
+            m_loggedCropExtent = true;
+
+            var norm = plan.NormalizedRect;
+            Debug.Log(
+                $"[ObjectTagger] DIAG crop extent measured ({measured.x:F6}, {measured.y:F6}) per metre, " +
+                $"normalized rect {norm.width:F6}x{norm.height:F6}, source {plan.SourceRect.width}x{plan.SourceRect.height}");
+
+            if (!RemoteCropSquarePlacement.TryMeasureExtentPerMetre(
+                    new Rect(0f, 0f, 1f, 1f),
+                    cameraPose,
+                    viewportPoint => m_cameraAccess.ViewportPointToRay(viewportPoint, cameraPose),
+                    out var fullExtent))
+            {
+                Debug.Log("[ObjectTagger] DIAG full-frame extent UNAVAILABLE");
+                return;
+            }
+
+            var fx = fullExtent.x > 0f ? resolution.x / fullExtent.x : 0f;
+            var fy = fullExtent.y > 0f ? resolution.y / fullExtent.y : 0f;
+            var expectedX = fx > 0f ? plan.SourceRect.width / fx : 0f;
+            var expectedY = fy > 0f ? plan.SourceRect.height / fy : 0f;
+
+            Debug.Log(
+                $"[ObjectTagger] DIAG full-frame extent ({fullExtent.x:F6}, {fullExtent.y:F6}), " +
+                $"implied f ({fx:F2}, {fy:F2}) px, " +
+                $"expected crop extent ({expectedX:F6}, {expectedY:F6})");
+            Debug.Log(
+                $"[ObjectTagger] DIAG ratio measured/expected " +
+                $"({(expectedX > 0f ? measured.x / expectedX : 0f):F6}, {(expectedY > 0f ? measured.y / expectedY : 0f):F6}), " +
+                $"linearity crop/full ({(fullExtent.x > 0f ? measured.x / fullExtent.x : 0f):F6}, " +
+                $"{(fullExtent.y > 0f ? measured.y / fullExtent.y : 0f):F6}) " +
+                $"vs normalized ({norm.width:F6}, {norm.height:F6})");
         }
 
         // Object Tagger manual-tagging Task 4 — B-button/pinch hold-duration
