@@ -172,17 +172,34 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             using (var request = UnityWebRequest.Post($"{config.MacBaseUrl}/v1/name", sections))
             {
                 request.SetRequestHeader("Authorization", $"Bearer {config.BearerToken}");
-                request.timeout = config.RequestTimeoutSeconds;
+                // Unity's integer timer can complete just before its configured boundary.
+                // Keep it disabled and enforce the exact deadline below.
+                request.timeout = 0;
 
                 if (!TryAttachLiveRequest(requestId, operationId, request))
                 {
                     yield break;
                 }
 
-                var startedAt = Time.realtimeSinceStartup;
-                yield return request.SendWebRequest();
+                var startedAt = Time.realtimeSinceStartupAsDouble;
+                var deadlineAt = startedAt + config.RequestTimeoutSeconds;
+                var operation = request.SendWebRequest();
+                while (!operation.isDone && Time.realtimeSinceStartupAsDouble < deadlineAt)
+                {
+                    yield return null;
+                }
 
-                var elapsedSeconds = Time.realtimeSinceStartup - startedAt;
+                var elapsedSeconds = Time.realtimeSinceStartupAsDouble - startedAt;
+                if (!operation.isDone)
+                {
+                    TryTerminateOperation(
+                        requestId,
+                        operationId,
+                        RemoteNamingFailureKind.Timeout,
+                        true);
+                    yield break;
+                }
+
                 if (!TryDetachLiveRequest(requestId, operationId, request))
                 {
                     yield break;
@@ -420,19 +437,24 @@ namespace PassthroughCameraSamples.MultiObjectDetection
     }
 
     /// <summary>
-    /// Classifies Unity transport outcomes without inspecting free-form error text.
+    /// Arbitrates the request deadline and Unity transport outcome without inspecting free-form error text.
     /// </summary>
     public static class RemoteNamingTransportClassifier
     {
         /// <summary>
-        /// Distinguishes an elapsed zero-status deadline from earlier connectivity loss.
+        /// Makes the observed deadline authoritative, then classifies earlier transport completion.
         /// </summary>
         public static RemoteNamingFailureKind Classify(
             UnityWebRequest.Result result,
             long statusCode,
-            float elapsedSeconds,
-            float deadlineSeconds)
+            double elapsedSeconds,
+            double deadlineSeconds)
         {
+            if (elapsedSeconds >= deadlineSeconds)
+            {
+                return RemoteNamingFailureKind.Timeout;
+            }
+
             if (result == UnityWebRequest.Result.DataProcessingError)
             {
                 return RemoteNamingFailureKind.InvalidResponse;
@@ -448,9 +470,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 return RemoteNamingFailureKind.InvalidResponse;
             }
 
-            return elapsedSeconds >= deadlineSeconds
-                ? RemoteNamingFailureKind.Timeout
-                : RemoteNamingFailureKind.Connectivity;
+            return RemoteNamingFailureKind.Connectivity;
         }
     }
 }

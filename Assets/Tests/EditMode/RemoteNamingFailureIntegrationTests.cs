@@ -27,7 +27,7 @@ namespace ObjectTagger.Tests.EditMode
         public void TransportClassificationUsesOnlyResultStatusAndElapsedDeadline(
             UnityWebRequest.Result result,
             long statusCode,
-            float elapsedSeconds,
+            double elapsedSeconds,
             RemoteNamingFailureKind expected)
         {
             Assert.AreEqual(
@@ -35,6 +35,21 @@ namespace ObjectTagger.Tests.EditMode
                 RemoteNamingTransportClassifier.Classify(
                     result,
                     statusCode,
+                    elapsedSeconds,
+                    RemoteRecognitionConfig.RequiredRequestTimeoutSeconds));
+        }
+
+        [TestCase(7.999, RemoteNamingFailureKind.None)]
+        [TestCase(8.0, RemoteNamingFailureKind.Timeout)]
+        public void CompletedRequestIsArbitratedAtTheObservedDeadline(
+            double elapsedSeconds,
+            RemoteNamingFailureKind expected)
+        {
+            Assert.AreEqual(
+                expected,
+                RemoteNamingTransportClassifier.Classify(
+                    UnityWebRequest.Result.Success,
+                    200,
                     elapsedSeconds,
                     RemoteRecognitionConfig.RequiredRequestTimeoutSeconds));
         }
@@ -114,6 +129,43 @@ namespace ObjectTagger.Tests.EditMode
 
         [UnityTest]
         [Timeout(15000)]
+        public IEnumerator PreDeadlineLoopbackCompletionCanSucceed()
+        {
+            using (var fixture = new ControllerFixture())
+            {
+                var operationId = fixture.BeginPendingOperation(Vector3.one);
+                var requestId = operationId.ToString("N");
+                using (var server = new LoopbackServer(
+                           200,
+                           Success(requestId, "near deadline object"),
+                           TimeSpan.FromSeconds(7)))
+                {
+                    var routine = fixture.CreateRequestRoutine(
+                        server.BaseUrl,
+                        requestId,
+                        operationId);
+
+                    Assert.IsTrue(routine.MoveNext());
+                    var request = fixture.LiveRequest;
+                    yield return routine.Current;
+                    while (routine.MoveNext())
+                    {
+                        yield return routine.Current;
+                    }
+                    yield return WaitFor(server.Completion);
+                    AssertRequestDisposed(request);
+                }
+
+                Assert.IsFalse(fixture.Session.IsRequestActive);
+                Assert.AreEqual("near deadline object", fixture.Session.PresentationText);
+                Assert.AreEqual(1, fixture.ActiveCardCount);
+                Assert.AreEqual("near deadline object", fixture.ActiveCardText);
+                Assert.IsNull(fixture.LiveRequest);
+            }
+        }
+
+        [UnityTest]
+        [Timeout(15000)]
         public IEnumerator DeadlineExceededOnLoopbackIsTimeoutAndLeavesNoLabel()
         {
             using (var fixture = new ControllerFixture())
@@ -142,6 +194,35 @@ namespace ObjectTagger.Tests.EditMode
                 Assert.AreEqual(CompanionReadinessKind.Ready, fixture.Readiness.Current.Kind);
                 Assert.AreEqual(0, fixture.ActiveCardCount);
                 Assert.IsNull(fixture.LiveRequest);
+            }
+        }
+
+        [UnityTest]
+        public IEnumerator ControllerOwnsDeadlineInsteadOfUnityIntegerTimeout()
+        {
+            using (var fixture = new ControllerFixture())
+            using (var server = new LoopbackServer(200, string.Empty, Timeout.InfiniteTimeSpan))
+            {
+                var operationId = fixture.BeginPendingOperation(Vector3.one);
+                var requestId = operationId.ToString("N");
+                var routine = fixture.CreateRequestRoutine(server.BaseUrl, requestId, operationId);
+
+                Assert.IsTrue(routine.MoveNext());
+                yield return WaitFor(server.RequestReceived);
+                var request = fixture.LiveRequest;
+
+                Assert.Zero(request.timeout);
+
+                Assert.IsTrue(fixture.Controller.TryCancelPending());
+                AssertRequestDisposed(request);
+                Assert.IsFalse(fixture.Session.IsRequestActive);
+                Assert.IsNull(fixture.Session.PresentationText);
+                Assert.AreEqual(0, fixture.ActiveCardCount);
+                Assert.IsNull(fixture.LiveRequest);
+                while (routine.MoveNext())
+                {
+                    yield return routine.Current;
+                }
             }
         }
 
@@ -195,11 +276,6 @@ namespace ObjectTagger.Tests.EditMode
                         RemoteNamingFailureKind.InvalidResponse));
 
                     server.ReleaseResponse();
-                    var asyncOperation = (UnityWebRequestAsyncOperation)oldRoutine.Current;
-                    while (!asyncOperation.isDone)
-                    {
-                        yield return null;
-                    }
                     while (oldRoutine.MoveNext())
                     {
                         yield return oldRoutine.Current;
