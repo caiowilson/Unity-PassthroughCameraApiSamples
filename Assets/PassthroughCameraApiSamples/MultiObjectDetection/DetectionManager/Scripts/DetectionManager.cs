@@ -43,6 +43,15 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // OnDestroy used to erase the saved anchor on every app close.
         private SpatialAnchorRestorationCoordinator m_anchorRestoration;
 
+        // Spatial-anchor Restoration Task 4: the once-per-session restore
+        // guard. Ready is re-entered every time a tracking blip recovers (see
+        // the coordinator's Unavailable fast path), and each re-entry would
+        // otherwise import the saved labels again on top of the ones already
+        // on screen -- doubling the room's labels on every blip. Set on the
+        // FIRST Ready of the session whatever the outcome, so "restore is
+        // attempted exactly once" holds even when there is nothing to restore.
+        private bool m_hasAttemptedLabelRestore;
+
         // Read by SentisInferenceRunManager, which discards a completed
         // detection when the shared anchor cannot place it in world space.
         internal bool IsSpatialAnchorReady =>
@@ -64,6 +73,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 Path.Combine(
                     Application.persistentDataPath, SpatialLabelSnapshotStore.DefaultFileName));
             m_anchorRestoration.StateChanged += OnAnchorRestorationStateChanged;
+
+            if (m_uiInference != null)
+            {
+                m_uiInference.LabelsChanged += OnLabelsChanged;
+                // StateChanged only fires on a CHANGE, and the machine starts
+                // outside Ready, so the initial hidden state has to be set here
+                // rather than waiting for a transition that never comes.
+                m_uiInference.SetRestorationAvailable(m_anchorRestoration.CanTag);
+            }
+
             m_anchorRestoration.Initialize();
         }
 
@@ -73,11 +92,34 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             return contentParent != null ? contentParent.gameObject : null;
         }
 
+        // Spatial-anchor Restoration Task 4: the anchor's world pose, read live
+        // off the GameObject the OVRSpatialAnchor component is attached to.
+        // Meta keeps that transform tracking the real-world anchor, so this is
+        // the anchor pose without this class -- or SentisInferenceUiManager --
+        // needing to hold an OVRSpatialAnchor reference.
+        private bool TryResolveAnchorPose(out Pose anchorPose)
+        {
+            var root = ResolveAnchorRoot();
+            if (root == null)
+            {
+                anchorPose = default;
+                return false;
+            }
+
+            anchorPose = new Pose(root.transform.position, root.transform.rotation);
+            return true;
+        }
+
         private void OnDestroy()
         {
             if (m_aimReticle != null)
             {
                 m_aimReticle.SetActive(false);
+            }
+
+            if (m_uiInference != null)
+            {
+                m_uiInference.LabelsChanged -= OnLabelsChanged;
             }
 
             if (m_anchorRestoration != null)
@@ -99,18 +141,82 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void OnAnchorRestorationStateChanged(SpatialAnchorRestorationState state)
         {
-            if (state != SpatialAnchorRestorationState.Resetting)
+            if (state == SpatialAnchorRestorationState.Resetting)
+            {
+                // Clearing the label views on the confirmed reset rather than after
+                // the erase completes: the erase can fail and be retried, and
+                // leaving labels on screen through that would say the reset had not
+                // happened. The snapshot on disk is still untouched until the erase
+                // succeeds, which is the ordering that actually matters.
+                //
+                // The LabelsChanged this raises does NOT write an empty snapshot
+                // over the saved one: OnLabelsChanged persists only when Ready,
+                // and the coordinator refuses a persist while Resetting anyway.
+                m_remoteNaming?.TryCancelPending();
+                m_uiInference?.ClearAnnotations();
+            }
+
+            var ready = state == SpatialAnchorRestorationState.Ready;
+            m_uiInference?.SetRestorationAvailable(ready);
+
+            // After SetRestorationAvailable(true), so restored views are created
+            // already visible instead of spawning hidden and flipping on.
+            if (ready)
+            {
+                RestoreSavedLabelsOnce();
+            }
+        }
+
+        // Spatial-anchor Restoration Task 4: import the saved labels, at most
+        // once per session. A snapshot with no labels is a freshly created
+        // anchor, not a restored room -- there is nothing to import, and the
+        // attempt is still consumed so a later Ready cannot re-import the
+        // labels this session has since committed and persisted.
+        private void RestoreSavedLabelsOnce()
+        {
+            if (m_hasAttemptedLabelRestore)
             {
                 return;
             }
 
-            // Clearing the label views on the confirmed reset rather than after
-            // the erase completes: the erase can fail and be retried, and
-            // leaving labels on screen through that would say the reset had not
-            // happened. The snapshot on disk is still untouched until the erase
-            // succeeds, which is the ordering that actually matters.
-            m_remoteNaming?.TryCancelPending();
-            m_uiInference?.ClearAnnotations();
+            m_hasAttemptedLabelRestore = true;
+
+            var snapshot = m_anchorRestoration.Snapshot;
+            if (snapshot?.labels == null ||
+                snapshot.labels.Length == 0 ||
+                m_uiInference == null ||
+                !TryResolveAnchorPose(out var anchorPose))
+            {
+                return;
+            }
+
+            var restored = m_uiInference.RestoreCommittedLabels(snapshot.labels, anchorPose);
+            Debug.Log(
+                $"[ObjectTagger] restored {restored} of {snapshot.labels.Length} saved spatial labels");
+        }
+
+        // Spatial-anchor Restoration Task 4: the committed set changed, so the
+        // snapshot on disk is now stale. Persist only when Ready -- outside it
+        // the anchor these positions are relative to is not the bound one, and
+        // saving against it would move every label on the next launch.
+        private void OnLabelsChanged()
+        {
+            if (m_anchorRestoration == null ||
+                !m_anchorRestoration.CanTag ||
+                m_uiInference == null ||
+                !TryResolveAnchorPose(out var anchorPose))
+            {
+                return;
+            }
+
+            // anchorUuid is left unset on purpose: Persist ignores whatever the
+            // caller puts there and stamps the live bound anchor's UUID, so a
+            // snapshot can never name an anchor its labels were not placed
+            // against.
+            m_anchorRestoration.Persist(new SpatialLabelSnapshot
+            {
+                labels = m_uiInference.ExportCommittedLabels(anchorPose)
+            });
         }
 
         private void OnTrackingLost() => m_remoteNaming?.TryCancelPending();
@@ -162,7 +268,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
 
             m_wasPausedLastFrame = m_uiMenuManager == null || m_uiMenuManager.IsPaused;
-            UpdateBButtonHoldState();
+            UpdateBButtonHoldState(canTag);
         }
 
         private void UpdateAimReticle()
@@ -360,8 +466,25 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private bool m_bClearAllFired;
         private bool m_bCanceledPendingOnPress;
 
-        private void UpdateBButtonHoldState()
+        // Spatial-anchor Restoration Task 4: the whole gesture is dropped
+        // outside Ready, including a press already in flight. Both of its
+        // outcomes remove committed labels, the views are hidden there so the
+        // user cannot see what they would be removing, and the removal would
+        // be written to disk the moment Ready returned. Commit input needs no
+        // equivalent guard: remote naming already requires canTag
+        // (RemoteNamingInputPolicy.CanStartResolvedAim, above) and
+        // SentisInferenceRunManager discards a detection outright unless
+        // IsSpatialAnchorReady.
+        private void UpdateBButtonHoldState(bool canTag)
         {
+            if (!canTag)
+            {
+                m_bIsHeld = false;
+                m_bClearAllFired = false;
+                m_bCanceledPendingOnPress = false;
+                return;
+            }
+
             var isHeldNow = InputManager.IsButtonBHeldOrMiddleFingerPinchHeld();
 
             if (isHeldNow && !m_bIsHeld)

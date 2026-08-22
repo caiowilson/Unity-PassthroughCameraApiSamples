@@ -265,6 +265,24 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private string[] m_labels;
         private readonly List<BoxView> m_boxViewPool = new();
 
+        // Spatial-anchor Restoration Task 4 — "the committed set changed".
+        //
+        // Raised for anything that alters what ExportCommittedLabels would
+        // return, and for nothing else. DetectionManager listens and writes a
+        // snapshot; that is the only consumer, and the reason the ghost
+        // preview is deliberately excluded: the ghost is not a label, it is
+        // one frame's aim, and persisting it would resurrect an object the
+        // user never tagged.
+        public event Action LabelsChanged;
+
+        // Spatial-anchor Restoration Task 4 — mirrors "the coordinator is
+        // Ready". False hides every committed view WITHOUT discarding it:
+        // Restoring and Unavailable are recoverable, so the label set (and the
+        // snapshot behind it) must survive them untouched and simply reappear.
+        // Defaults to true so a scene with no DetectionManager -- every
+        // existing edit-mode fixture -- behaves exactly as before this task.
+        private bool m_restorationAvailable = true;
+
         private void Awake() => m_detectionBoxPrefab.gameObject.SetActive(false);
 
         // Object Tagger slice 2 Task 5 — detection and depth-raycast counters.
@@ -617,6 +635,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             var liveCandidateDetectionIndex = NearestSelection.IndexOfMinimum(centerDistances);
 
             LiveCandidateState? newLiveCandidate = null;
+            var associationUpdated = false;
 
             // Draw the bounding boxes
             for (var i = 0; i < detections.Count; i++)
@@ -674,6 +693,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     record.SmoothedPosition = LabelPresentation.Smooth(record.SmoothedPosition, worldSpaceCenter, SmoothingFactor);
                     record.LastAssociatedScore = detection.score;
                     view.Label.text = $"{record.ClassName} — {Mathf.RoundToInt(record.LastAssociatedScore * 100)}%";
+                    associationUpdated = true;
                 }
 
                 if (i == liveCandidateDetectionIndex)
@@ -717,6 +737,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // this exact tick, so RefreshGhostView would never run again and the
                 // ghost's GameObject would stay active forever at its last position.
                 HideGhostView();
+            }
+
+            // Spatial-anchor Restoration Task 4: raised ONCE per call, not once
+            // per association -- ten re-detected labels in one tick are one
+            // change to the committed set, so one snapshot write. Deliberately
+            // outside the m_liveCandidate handling above: the ghost is not a
+            // committed label and never triggers a write.
+            if (associationUpdated)
+            {
+                RaiseLabelsChanged();
             }
         }
 
@@ -789,8 +819,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             view.Record = record;
             view.Label.text = RemoteSpatialLabelLifecycle.PresentationFor(record);
             view.RectTransform.position = point;
-            view.RectTransform.gameObject.SetActive(true);
+            view.RectTransform.gameObject.SetActive(m_restorationAvailable);
             m_boxViews.Add(view);
+
+            // No LabelsChanged: a label still being identified is not part of
+            // the committed set ExportCommittedLabels returns, so nothing a
+            // snapshot would record has changed yet.
             return true;
         }
 
@@ -809,6 +843,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
 
             view.Label.text = RemoteSpatialLabelLifecycle.PresentationFor(view.Record);
+            RaiseLabelsChanged();
             return true;
         }
 
@@ -831,6 +866,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             }
 
             view.Label.text = RemoteSpatialLabelLifecycle.PresentationFor(view.Record);
+            RaiseLabelsChanged();
             return true;
         }
 
@@ -842,8 +878,18 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 return false;
             }
 
+            var wasCommitted = IsCommitted(m_boxViews[viewIndex].Record);
             ReturnToPool(m_boxViews[viewIndex]);
             m_boxViews.RemoveAt(viewIndex);
+
+            // Cancelling an in-flight naming operation is the common case here
+            // and leaves the committed set untouched. Only a committed label's
+            // removal is worth a snapshot write.
+            if (wasCommitted)
+            {
+                RaiseLabelsChanged();
+            }
+
             return true;
         }
 
@@ -893,12 +939,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 view.Record.ClassName = candidate.ClassName;
                 view.Record.SmoothedPosition = candidate.WorldPosition;
                 m_boxViews.Add(view);
-                view.RectTransform.gameObject.SetActive(true);
+                view.RectTransform.gameObject.SetActive(m_restorationAvailable);
             }
 
             view.Record.WorldPosition = candidate.WorldPosition;
             view.Record.LastAssociatedScore = candidate.Score;
             view.Label.text = $"{view.Record.ClassName} — {Mathf.RoundToInt(view.Record.LastAssociatedScore * 100)}%";
+            RaiseLabelsChanged();
             return true;
         }
 
@@ -931,6 +978,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             var nearestIndex = NearestSelection.IndexOfMinimum(angularSeparations);
             ReturnToPool(m_boxViews[nearestIndex]);
             m_boxViews.RemoveAt(nearestIndex);
+            RaiseLabelsChanged();
             return true;
         }
 
@@ -971,7 +1019,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 m_ghostView = CreateGhostView();
             }
 
-            if (!m_liveCandidate.HasValue)
+            // Spatial-anchor Restoration Task 4: the ghost is an aiming
+            // affordance for a commit that cannot happen outside Ready, so it
+            // is hidden alongside the committed views. Belt-and-braces --
+            // SentisInferenceRunManager already invalidates the live candidate
+            // when the anchor is not ready -- but this is the one place that
+            // can re-activate the ghost GameObject, so the guard belongs here.
+            if (!m_restorationAvailable || !m_liveCandidate.HasValue)
             {
                 m_ghostView.RectTransform.gameObject.SetActive(false);
                 return;
@@ -1078,11 +1132,194 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         public void ClearAnnotations()
         {
+            if (m_boxViews.Count == 0)
+            {
+                return;
+            }
+
             foreach (var view in m_boxViews)
             {
                 ReturnToPool(view);
             }
             m_boxViews.Clear();
+            RaiseLabelsChanged();
         }
+
+        // ------------------------------------------------------------------
+        // Spatial-anchor Restoration Task 4 — snapshot import/export.
+        //
+        // This class imports and exports the committed label set and does
+        // nothing else with it: no Meta SDK call, no file I/O, no knowledge of
+        // whether an anchor exists. The anchor arrives as a plain
+        // UnityEngine.Pose from the caller, which is what keeps the whole
+        // conversion testable in EditMode and keeps the anchor lifecycle
+        // wholly inside SpatialAnchorRestorationCoordinator.
+        // ------------------------------------------------------------------
+
+        /// Every currently committed label, with positions expressed relative
+        /// to anchorPose so they survive the anchor being re-localized to a
+        /// different world transform on the next launch.
+        ///
+        /// Pending remote labels are excluded: an unfinished naming operation
+        /// is not a label the user placed, and restoring one would resurrect a
+        /// permanent "Identifying…" card. Entries that could not be persisted
+        /// (see SpatialLabelEntry.IsValid) are dropped individually, because
+        /// the coordinator rejects a whole snapshot containing one bad label.
+        public SpatialLabelEntry[] ExportCommittedLabels(Pose anchorPose)
+        {
+            var entries = new List<SpatialLabelEntry>(m_boxViews.Count);
+            foreach (var view in m_boxViews)
+            {
+                var record = view.Record;
+                var className = CommittedDisplayName(record);
+                if (className == null)
+                {
+                    continue;
+                }
+
+                var entry = new SpatialLabelEntry
+                {
+                    id = record.SessionId.ToString(),
+                    // Meaningless for a remote-origin label -- nothing ever
+                    // sets ClassId on one -- and knowingly exported as-is: the
+                    // snapshot format has no "source" field by design, and
+                    // widening it is out of this task's scope.
+                    classId = record.ClassId,
+                    className = className,
+                    score = record.LastAssociatedScore,
+                    // The SMOOTHED position, not WorldPosition: it is the one
+                    // actually rendered, so what is saved is what was seen.
+                    localPosition =
+                        SpatialLabelSnapshot.ToLocalPosition(record.SmoothedPosition, anchorPose),
+                };
+
+                if (entry.IsValid())
+                {
+                    entries.Add(entry);
+                }
+            }
+
+            return entries.ToArray();
+        }
+
+        /// Rebuilds committed views for every valid entry, placing each one at
+        /// the world position anchorPose implies. Returns how many were
+        /// restored; invalid and null entries are skipped individually rather
+        /// than failing the whole import.
+        ///
+        /// Additive by design, and NOT idempotent: calling it twice duplicates
+        /// every label. The once-per-session guard lives in DetectionManager,
+        /// which is the only class that knows when a restoration actually
+        /// happened as opposed to a tracking blip recovering.
+        public int RestoreCommittedLabels(SpatialLabelEntry[] labels, Pose anchorPose)
+        {
+            if (labels == null)
+            {
+                return 0;
+            }
+
+            var restored = 0;
+            foreach (var entry in labels)
+            {
+                if (entry == null || !entry.IsValid())
+                {
+                    continue;
+                }
+
+                var view = GetViewFromPoolOrCreate();
+                var worldPosition = SpatialLabelSnapshot.ToWorldPosition(entry.localPosition, anchorPose);
+
+                // Restored uniformly as LocalDetection, whatever created the
+                // original. The snapshot keeps no source or remote state, and
+                // inventing a RemoteRecognition record without an in-flight
+                // operation id would put a card in FindRemoteViewIndex's reach
+                // for an operation that no longer exists. As a local record it
+                // is instead eligible for ordinary re-association on the next
+                // detection, which is the closest thing to correct that the
+                // stored data supports.
+                var record = view.Record;
+                record.SessionId = Guid.NewGuid();
+                record.Source = LabelSource.LocalDetection;
+                record.RemoteState = RemoteLabelState.None;
+                record.RemoteName = null;
+                record.IsFallbackResult = false;
+                record.ClassId = entry.classId;
+                record.ClassName = entry.className;
+                record.WorldPosition = worldPosition;
+                record.SmoothedPosition = worldPosition;
+                record.LastAssociatedScore = entry.score;
+
+                // The stored name only. A remote-named label never had a
+                // confidence, so appending "— 0%" would invent one; the
+                // existing per-frame billboard and scale pass then takes over
+                // unchanged from here.
+                view.Label.text = entry.className;
+                view.RectTransform.position = worldPosition;
+                view.RectTransform.gameObject.SetActive(m_restorationAvailable);
+                m_boxViews.Add(view);
+                restored++;
+            }
+
+            if (restored > 0)
+            {
+                RaiseLabelsChanged();
+            }
+
+            return restored;
+        }
+
+        /// Shows or hides every committed view to match the coordinator being
+        /// Ready. Never touches the label set itself, so nothing a snapshot
+        /// would record changes and no LabelsChanged is raised.
+        public void SetRestorationAvailable(bool available)
+        {
+            if (m_restorationAvailable == available)
+            {
+                return;
+            }
+
+            m_restorationAvailable = available;
+
+            foreach (var view in m_boxViews)
+            {
+                view.RectTransform.gameObject.SetActive(available);
+            }
+
+            if (!available)
+            {
+                HideGhostView();
+            }
+        }
+
+        /// The exported name for a committed label, or null when the label is
+        /// not committed. LocalDetection records are committed the instant
+        /// they exist; a remote record only once its naming operation resolved.
+        private static string CommittedDisplayName(LabelRecord record)
+        {
+            if (record == null)
+            {
+                return null;
+            }
+
+            if (record.Source == LabelSource.LocalDetection)
+            {
+                return record.ClassName;
+            }
+
+            // The RemoteState check is what excludes a pending label:
+            // PresentationFor happily returns the "Identifying…" placeholder
+            // for one, and exporting that would persist a naming operation as
+            // though it were a name.
+            return record.RemoteState == RemoteLabelState.Committed
+                // Already folds in the "(on-headset)" marker for a
+                // fallback-committed label; ClassName is never set on a
+                // remote-origin record, so it cannot be used here.
+                ? RemoteSpatialLabelLifecycle.PresentationFor(record)
+                : null;
+        }
+
+        private static bool IsCommitted(LabelRecord record) => CommittedDisplayName(record) != null;
+
+        private void RaiseLabelsChanged() => LabelsChanged?.Invoke();
     }
 }
