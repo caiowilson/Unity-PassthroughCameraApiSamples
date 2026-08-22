@@ -132,6 +132,28 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
                     break;
 
+                case SpatialAnchorRestorationState.Unavailable:
+                    // A single untracked frame must not cost five seconds of
+                    // disabled tagging and hidden labels. When the component is
+                    // still bound to the saved anchor and tracking has come
+                    // back, Ready is recoverable on the very next frame with no
+                    // SDK round-trip at all -- which is what the per-frame
+                    // IsTracked gate this state machine replaced used to do.
+                    // The five-second cadence is for attempts that need the
+                    // anchor store, not for a tracking blip.
+                    if (IsBoundToSavedAnchorAndTracked())
+                    {
+                        SetState(SpatialAnchorRestorationState.Ready);
+                        break;
+                    }
+
+                    if (realtimeSinceStartup >= m_nextAttemptAt)
+                    {
+                        StartAttempt();
+                    }
+
+                    break;
+
                 case SpatialAnchorRestorationState.Resetting:
                     if (realtimeSinceStartup >= m_nextAttemptAt)
                     {
@@ -384,6 +406,21 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             Snapshot = candidate;
             return true;
+        }
+
+        // Compares parsed UUIDs rather than strings so a snapshot written with
+        // different casing or braces still matches the bound anchor.
+        private bool IsBoundToSavedAnchorAndTracked()
+        {
+            if (Snapshot == null || !m_operations.IsAnchorTracked)
+            {
+                return false;
+            }
+
+            return m_operations.TryGetBoundAnchorUuid(out var bound)
+                && Guid.TryParse(bound, out var boundUuid)
+                && Guid.TryParse(Snapshot.anchorUuid, out var savedUuid)
+                && boundUuid == savedUuid;
         }
 
         private void EnterUnavailable(float now)

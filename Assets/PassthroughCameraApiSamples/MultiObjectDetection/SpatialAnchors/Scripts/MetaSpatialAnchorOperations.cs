@@ -14,8 +14,19 @@
 // OVRTask is polled through GetAwaiter()/IsCompleted rather than awaited, the
 // pattern the rest of this project already uses, so every step stays on a
 // coroutine with a single owner and no synchronization-context surprises.
-// Every unbounded wait carries a deadline: an operation that never reports
-// back is the failure mode this whole task exists to eliminate.
+//
+// Deadlines cover the waits that poll a STATE (localizing, IsTracked), which
+// are the ones observed to stall. The OVRTask awaiter loops are deliberately
+// unbounded -- an OVRTask that never completes has no cancellation to offer
+// here -- so the backstop for those is the coordinator's
+// OperationTimeoutSeconds watchdog, not a deadline in this file.
+//
+// Log levels follow one rule: a cause the coordinator will retry and that can
+// resolve itself (no tracking yet, the space not recognised yet, a transient
+// load or localize failure) is a WARNING, because on a headset set down on a
+// desk it repeats every five seconds. A cause that indicates a bug or
+// permanently broken input (a non-UUID, a missing label root, BindTo rejected,
+// a failed save or erase) is an ERROR.
 
 using System;
 using System.Collections;
@@ -217,13 +228,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             var loadResult = loadAwaiter.GetResult();
             if (!loadResult.Success)
             {
-                LogAnchor($"LoadUnboundAnchorsAsync({uuid}) failed {loadResult.Status}", LogType.Error);
+                LogAnchor($"LoadUnboundAnchorsAsync({uuid}) failed {loadResult.Status}", LogType.Warning);
                 yield break;
             }
 
             if (unbound.Count == 0)
             {
-                LogAnchor($"the saved anchor {uuid} is not in this headset's anchor store", LogType.Error);
+                LogAnchor($"the saved anchor {uuid} is not in this headset's anchor store yet", LogType.Warning);
                 yield break;
             }
 
@@ -252,7 +263,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             var loadResult = loadAwaiter.GetResult();
             if (!loadResult.Success)
             {
-                LogAnchor($"LoadUnboundAnchorsAsync({uuid}) failed {loadResult.Status} while resuming", LogType.Error);
+                LogAnchor($"LoadUnboundAnchorsAsync({uuid}) failed {loadResult.Status} while resuming", LogType.Warning);
                 yield break;
             }
 
@@ -284,7 +295,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             if (!localizeAwaiter.GetResult())
             {
-                LogAnchor($"LocalizeAsync() failed for {unbound.Uuid}", LogType.Error);
+                LogAnchor($"LocalizeAsync() failed for {unbound.Uuid}", LogType.Warning);
                 yield break;
             }
 
@@ -337,13 +348,19 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 }
 
                 var result = awaiter.GetResult();
-                ReleaseRuntimeAnchor();
                 if (!result.Success)
                 {
+                    // Deliberately KEEPS the component. Releasing it here would
+                    // leave the retry with nothing to erase through, and when
+                    // the snapshot is also null -- a reset requested during
+                    // first-run creation -- the retry would take the "nothing
+                    // to erase" branch below and report success over an anchor
+                    // that still exists.
                     LogAnchor($"EraseAnchorAsync() failed {result.Status} for {uuid}", LogType.Error);
                     yield break;
                 }
 
+                ReleaseRuntimeAnchor();
                 LogAnchor($"erased the saved anchor {uuid}");
                 m_succeeded = true;
                 yield break;

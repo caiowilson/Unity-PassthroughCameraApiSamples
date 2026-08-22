@@ -189,6 +189,104 @@ namespace ObjectTagger.Tests.EditMode
             Assert.IsFalse(coordinator.CanTag);
             Assert.AreEqual(uuid, coordinator.Snapshot.anchorUuid);
             Assert.IsEmpty(m_operations.EraseRequests, "Tracking loss must never erase the saved anchor.");
+
+            // Recovery, not just loss: a one-frame blip must not cost five
+            // seconds of disabled tagging. The pre-Task-3 per-frame IsTracked
+            // gate recovered on the next frame and so must this.
+            m_operations.IsAnchorTracked = true;
+            coordinator.Tick(1f + 1f / 72f);
+
+            Assert.AreEqual(SpatialAnchorRestorationState.Ready, coordinator.State,
+                "A single untracked frame must not impose the five-second retry floor.");
+            Assert.IsTrue(coordinator.CanTag);
+            Assert.AreEqual(1, m_operations.RestoreRequests.Count,
+                "Recovering an already-bound, already-tracked anchor needs no anchor-store round-trip.");
+        }
+
+        [Test]
+        public void UnavailableDoesNotRecoverWhenTheBoundAnchorIsNotTheSavedOne()
+        {
+            var uuid = WriteSnapshot();
+            var coordinator = ReadyCoordinator(uuid);
+
+            m_operations.IsAnchorTracked = false;
+            coordinator.Tick(1f);
+            Assert.AreEqual(SpatialAnchorRestorationState.Unavailable, coordinator.State);
+
+            // Tracking is back, but the component is bound to a different
+            // anchor. The fast path must not call that Ready: labels would land
+            // against an anchor the snapshot does not describe.
+            m_operations.BoundAnchorUuid = Guid.NewGuid().ToString();
+            m_operations.IsAnchorTracked = true;
+            coordinator.Tick(2f);
+
+            Assert.AreEqual(SpatialAnchorRestorationState.Unavailable, coordinator.State);
+            Assert.IsFalse(coordinator.CanTag);
+        }
+
+        [Test]
+        public void UnavailableAfterARestoreFailureStillWaitsTheFullRetryInterval()
+        {
+            WriteSnapshot();
+            var coordinator = NewCoordinator();
+            coordinator.Initialize();
+            m_operations.CompleteWithFailure();
+            coordinator.Tick(10f);
+            Assert.AreEqual(SpatialAnchorRestorationState.Unavailable, coordinator.State);
+
+            // Nothing is bound here, so the fast recovery path must not fire and
+            // the five-second cadence still governs.
+            coordinator.Tick(10.1f);
+
+            Assert.AreEqual(SpatialAnchorRestorationState.Unavailable, coordinator.State);
+            Assert.AreEqual(1, m_operations.RestoreRequests.Count);
+        }
+
+        [Test]
+        public void PersistSucceedsWhileUnavailableWhenTheAnchorIsStillBound()
+        {
+            var uuid = WriteSnapshot();
+            var coordinator = ReadyCoordinator(uuid);
+            m_operations.IsAnchorTracked = false;
+            coordinator.Tick(1f);
+            Assert.AreEqual(SpatialAnchorRestorationState.Unavailable, coordinator.State);
+
+            // An untag or clear-all that lands during a tracking blip must not
+            // be silently dropped -- the labels really did change.
+            var saved = coordinator.Persist(new SpatialLabelSnapshot
+            {
+                labels = new[] { NewLabel("chair") }
+            });
+
+            Assert.IsTrue(saved);
+            Assert.IsTrue(SpatialLabelSnapshotStore.TryLoad(m_path, out var onDisk));
+            Assert.AreEqual(uuid, onDisk.anchorUuid);
+            Assert.AreEqual(1, onDisk.labels.Length);
+        }
+
+        [Test]
+        public void ACreatedAnchorThatCannotBePersistedDoesNotBecomeReady()
+        {
+            // Makes TrySave fail for real: the snapshot's parent directory path
+            // is an existing FILE, so Directory.CreateDirectory throws.
+            var blocker = Path.Combine(m_directory, "blocker");
+            File.WriteAllText(blocker, "not a directory");
+            m_path = Path.Combine(blocker, SpatialLabelSnapshotStore.DefaultFileName);
+
+            var coordinator = NewCoordinator();
+            coordinator.Initialize();
+            Assert.AreEqual(1, m_operations.CreateRequests);
+
+            m_operations.CompleteWithSuccess(Guid.NewGuid().ToString());
+            coordinator.Tick(0f);
+
+            Assert.AreEqual(SpatialAnchorRestorationState.NoSavedSpace, coordinator.State,
+                "Tagging must not be enabled against a UUID that was never persisted.");
+            Assert.IsFalse(coordinator.CanTag);
+            Assert.IsNull(coordinator.Snapshot);
+
+            coordinator.Tick(SpatialAnchorRestorationCoordinator.RetryIntervalSeconds);
+            Assert.AreEqual(2, m_operations.CreateRequests);
         }
 
         [Test]
