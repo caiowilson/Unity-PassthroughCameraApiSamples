@@ -65,3 +65,4 @@ MonoBehaviour:
   m_readinessController: {fileID: 0}
   m_menuManager: {fileID: 0}
   m_uiInference: {fileID: 0}
+  m_inferenceRunManager: {fileID: 0}
