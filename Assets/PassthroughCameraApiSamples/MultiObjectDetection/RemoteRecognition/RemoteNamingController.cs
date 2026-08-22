@@ -373,12 +373,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     0,
                     RenderTextureFormat.ARGB32);
 
-                var uvScale = new Vector2(
-                    (float)plan.SourceRect.width / frame.width,
-                    (float)plan.SourceRect.height / frame.height);
-                var uvOffset = new Vector2(
-                    (float)plan.SourceRect.x / frame.width,
-                    (float)plan.SourceRect.y / frame.height);
+                // One source of truth with the aiming square. See
+                // RemoteImageCropPlan.NormalizedRect.
+                var normalized = plan.NormalizedRect;
+                var uvScale = new Vector2(normalized.width, normalized.height);
+                var uvOffset = new Vector2(normalized.x, normalized.y);
 
                 Graphics.Blit(frame, target, uvScale, uvOffset);
                 RenderTexture.active = target;
