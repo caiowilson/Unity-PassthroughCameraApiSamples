@@ -327,19 +327,24 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // Note the original condition is three-way: a camera that never started --
             // i.e. a permission failure -- presents identically to an untracked anchor.
             // The two are separated here so the UI reports only the anchor.
-            var anchorTracked = m_detectionManager.m_spatialAnchor != null
-                                && m_detectionManager.m_spatialAnchor.IsTracked;
+            //
+            // Spatial-anchor Restoration Task 3: the verdict now comes from the
+            // restoration state machine instead of Meta's raw IsTracked flag.
+            // Ready additionally means the anchor is the SAVED one, so a
+            // detection can no longer be placed against a replacement anchor
+            // the next launch will not recognise.
+            var anchorTracked = m_detectionManager.IsSpatialAnchorReady;
             m_uiMenuManager.SetAnchorTracked(anchorTracked);
 
             if (!m_cameraAccess.IsPlaying || !anchorTracked)
             {
                 // Final-review fix (Important #1): see the comment above this
                 // method's first yield break. This exit matters most: it's the
-                // one EraseSpatialAnchor's anchor-loss path routes through, and
-                // that path also calls m_uiInference.ClearAnnotations() -- which
-                // only clears committed labels, not the live candidate/ghost.
-                // Without this call the ghost would survive even after every
-                // real label is wiped.
+                // one anchor loss routes through, and a confirmed reset also
+                // calls m_uiInference.ClearAnnotations() -- which only clears
+                // committed labels, not the live candidate/ghost. Without this
+                // call the ghost would survive even after every real label is
+                // wiped.
                 m_uiInference.InvalidateLiveCandidate();
                 yield break;
             }

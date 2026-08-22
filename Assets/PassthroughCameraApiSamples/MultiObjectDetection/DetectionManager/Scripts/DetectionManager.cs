@@ -1,7 +1,6 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
-using System.Collections;
-using System.Collections.Generic;
+using System.IO;
 using Meta.XR;
 using Meta.XR.Samples;
 using UnityEngine;
@@ -35,14 +34,43 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private bool m_hasCropExtent;
         private bool m_loggedCropExtent;
         private bool m_loggedCropGeometry;
-        internal OVRSpatialAnchor m_spatialAnchor;
-        private bool m_isHeadsetTracking;
+        // Spatial-anchor Restoration Task 3: the shared anchor is no longer a
+        // field here. Its whole lifecycle -- restore the saved one, or create
+        // and save a first-run one, and erase it ONLY on a confirmed reset --
+        // belongs to the coordinator, and the live OVRSpatialAnchor component
+        // belongs to the operations adapter behind it. Nothing outside that
+        // adapter can reach EraseAnchorAsync any more, which is the point:
+        // OnDestroy used to erase the saved anchor on every app close.
+        private SpatialAnchorRestorationCoordinator m_anchorRestoration;
+
+        // Read by SentisInferenceRunManager, which discards a completed
+        // detection when the shared anchor cannot place it in world space.
+        internal bool IsSpatialAnchorReady =>
+            m_anchorRestoration != null && m_anchorRestoration.CanTag;
 
         private void Awake()
         {
-            StartCoroutine(UpdateSpatialAnchor());
             OVRManager.TrackingLost += OnTrackingLost;
-            OVRManager.TrackingAcquired += OnTrackingAcquired;
+        }
+
+        // Deferred to Start so the shared label root the anchor attaches to is
+        // resolvable, and so Initialize() -- which reads the saved snapshot off
+        // disk -- runs once the scene is fully awake.
+        private void Start()
+        {
+            var operations = new MetaSpatialAnchorOperations(this, ResolveAnchorRoot);
+            m_anchorRestoration = new SpatialAnchorRestorationCoordinator(
+                operations,
+                Path.Combine(
+                    Application.persistentDataPath, SpatialLabelSnapshotStore.DefaultFileName));
+            m_anchorRestoration.StateChanged += OnAnchorRestorationStateChanged;
+            m_anchorRestoration.Initialize();
+        }
+
+        private GameObject ResolveAnchorRoot()
+        {
+            var contentParent = m_uiInference != null ? m_uiInference.ContentParent : null;
+            return contentParent != null ? contentParent.gameObject : null;
         }
 
         private void OnDestroy()
@@ -52,17 +80,40 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 m_aimReticle.SetActive(false);
             }
 
-            EraseSpatialAnchor();
+            if (m_anchorRestoration != null)
+            {
+                m_anchorRestoration.StateChanged -= OnAnchorRestorationStateChanged;
+
+                // Runtime disposal only. Teardown deliberately does NOT erase
+                // the Meta anchor or delete the snapshot -- that is what makes
+                // a tagged room survive an app close.
+                m_anchorRestoration.Shutdown();
+            }
+
             OVRManager.TrackingLost -= OnTrackingLost;
-            OVRManager.TrackingAcquired -= OnTrackingAcquired;
         }
 
-        private void OnTrackingLost()
+        // The confirmed "forget saved room and labels" path. Task 5 wires the
+        // settings screen to this; the erase itself lives in the coordinator.
+        internal void RequestSpatialSpaceReset() => m_anchorRestoration?.RequestReset();
+
+        private void OnAnchorRestorationStateChanged(SpatialAnchorRestorationState state)
         {
-            m_isHeadsetTracking = false;
+            if (state != SpatialAnchorRestorationState.Resetting)
+            {
+                return;
+            }
+
+            // Clearing the label views on the confirmed reset rather than after
+            // the erase completes: the erase can fail and be retried, and
+            // leaving labels on screen through that would say the reset had not
+            // happened. The snapshot on disk is still untouched until the erase
+            // succeeds, which is the ordering that actually matters.
             m_remoteNaming?.TryCancelPending();
+            m_uiInference?.ClearAnnotations();
         }
-        private void OnTrackingAcquired() => m_isHeadsetTracking = true;
+
+        private void OnTrackingLost() => m_remoteNaming?.TryCancelPending();
 
         // Object Tagger manual-tagging Task 4 — A commits the live
         // candidate; B is overloaded by press duration: a quick press
@@ -84,9 +135,15 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             // this frame share one physical-camera/depth sample.
             UpdateAimReticle();
 
-            var anchorTracked = m_spatialAnchor != null && m_spatialAnchor.IsTracked;
+            // Spatial-anchor Restoration Task 3: tagging is gated on the whole
+            // restoration state machine, not on Meta's raw IsTracked flag. Only
+            // Ready means the shared anchor is the SAVED one, bound and
+            // localized -- tagging before that would pin labels to an anchor
+            // the next launch will not recognise.
+            m_anchorRestoration?.Tick(Time.realtimeSinceStartup);
+            var canTag = IsSpatialAnchorReady;
             HandleRemoteAvailability(
-                anchorTracked,
+                canTag,
                 m_uiMenuManager == null || m_uiMenuManager.IsPaused);
 
             if (wasStartedAtFrameStart &&
@@ -95,7 +152,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     m_cameraAccess.IsPlaying,
                     m_uiMenuManager.IsPaused,
                     m_wasPausedLastFrame,
-                    anchorTracked,
+                    canTag,
                     m_currentAimFrame.HasResolvedTarget) &&
                 InputManager.IsButtonADownOrPinchStarted())
             {
@@ -365,154 +422,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_uiInference?.ClearAnnotations();
         }
 
-        private void HandleRemoteAvailability(bool anchorTracked, bool appPaused)
+        private void HandleRemoteAvailability(bool canTag, bool appPaused)
         {
-            if (!anchorTracked || appPaused)
+            if (!canTag || appPaused)
             {
                 m_remoteNaming?.TryCancelPending();
             }
-        }
-
-        private IEnumerator UpdateSpatialAnchor()
-        {
-            while (true)
-            {
-                yield return null;
-                if (m_spatialAnchor == null)
-                {
-                    yield return CreateSpatialAnchorAndSave();
-                    if (m_spatialAnchor == null)
-                    {
-                        continue;
-                    }
-                }
-
-                if (!m_spatialAnchor.IsTracked)
-                {
-                    yield return RestoreSpatialAnchorTracking();
-                }
-            }
-
-            IEnumerator CreateSpatialAnchorAndSave()
-            {
-                m_spatialAnchor = m_uiInference.ContentParent.gameObject.AddComponent<OVRSpatialAnchor>();
-
-                // Wait for localization because SaveAnchorAsync() requires the anchor to be localized first.
-                while (true)
-                {
-                    if (m_spatialAnchor == null)
-                    {
-                        // Spatial Anchor destroys itself when creation fails.
-                        yield break;
-                    }
-                    if (m_spatialAnchor.Localized)
-                    {
-                        break;
-                    }
-                    yield return null;
-                }
-
-                // Save the anchor.
-                var awaiter = m_spatialAnchor.SaveAnchorAsync().GetAwaiter();
-                while (!awaiter.IsCompleted)
-                {
-                    yield return null;
-                }
-                var saveAnchorResult = awaiter.GetResult();
-                if (!saveAnchorResult.Success)
-                {
-                    LogSpatialAnchor($"SaveAnchorAsync() failed {saveAnchorResult}", LogType.Error);
-                    EraseSpatialAnchor();
-                    yield break;
-                }
-                LogSpatialAnchor("created");
-            }
-
-            IEnumerator RestoreSpatialAnchorTracking()
-            {
-                // Try to restore spatial anchor tracking. If restoration fails, erase it.
-                LogSpatialAnchor("tracking was lost, restoring...");
-                const int numRetries = 20;
-                for (int i = 0; i < numRetries; i++)
-                {
-                    yield return new WaitForSeconds(1f);
-                    if (!m_isHeadsetTracking)
-                    {
-                        LogSpatialAnchor($"{nameof(m_isHeadsetTracking)} is false, retrying ({i})");
-                        continue;
-                    }
-
-                    var unboundAnchors = new List<OVRSpatialAnchor.UnboundAnchor>(1);
-                    var awaiter = OVRSpatialAnchor.LoadUnboundAnchorsAsync(new[]
-                    {
-                        m_spatialAnchor.Uuid
-                    }, unboundAnchors).GetAwaiter();
-                    while (!awaiter.IsCompleted)
-                    {
-                        yield return null;
-                    }
-                    var loadResult = awaiter.GetResult();
-                    if (!loadResult.Success)
-                    {
-                        LogSpatialAnchor($"LoadUnboundAnchorsAsync() failed {loadResult.Status}, retrying ({i})", LogType.Error);
-                        continue;
-                    }
-                    if (unboundAnchors.Count != 0)
-                    {
-                        LogSpatialAnchor($"LoadUnboundAnchorsAsync() unexpected count:{unboundAnchors.Count}, retrying ({i})", LogType.Error);
-                        continue;
-                    }
-                    yield return null;
-                    if (!m_spatialAnchor.IsTracked)
-                    {
-                        LogSpatialAnchor($"tracking is not restored, retrying ({i})");
-                        continue;
-                    }
-
-                    LogSpatialAnchor("tracking was restored successfully");
-                    yield break;
-                }
-
-                LogSpatialAnchor($"tracking restoration failed after {numRetries} retries", LogType.Warning);
-                EraseSpatialAnchor();
-            }
-        }
-
-        private void EraseSpatialAnchor()
-        {
-            if (m_spatialAnchor != null)
-            {
-                LogSpatialAnchor("EraseSpatialAnchor");
-                m_spatialAnchor.EraseAnchorAsync();
-                DestroyImmediate(m_spatialAnchor);
-                m_spatialAnchor = null;
-
-                CleanMarkers();
-                m_remoteNaming?.TryCancelPending();
-                m_uiInference.ClearAnnotations();
-            }
-        }
-
-        // Object Tagger slice 5 Task 1: the marker-destroy loop, m_spawnedEntities
-        // clear, and OnObjectsIdentified invocation are deleted along with the rest of
-        // the "spawn 3D marker" feature (SpawnCurrentDetectedObjects and
-        // HasExistingMarkerInBoundingBox, both removed). Final-review fix (Important
-        // #5): removed on the design spec's non-adoption clause
-        // (docs/superpowers/specs/2026-08-14-object-tagger-alpha-design.md, line 57:
-        // "the sample's marker interaction which is not adopted"), not because the
-        // feature was dead code — the project's validation record
-        // (docs/validation/2026-08-15-slice-5-labels.md, D-slice5-1) found it was
-        // very likely live in the running app before this deletion. CleanMarkers()
-        // itself is kept: EraseSpatialAnchor() (spatial-anchor lifecycle, out of
-        // scope for this task) still calls it.
-        private void CleanMarkers()
-        {
-            LogSpatialAnchor("CleanMarkers");
-        }
-
-        private static void LogSpatialAnchor(string message, LogType logType = LogType.Log)
-        {
-            Debug.unityLogger.Log(logType, $"{nameof(OVRSpatialAnchor)}: {message}");
         }
     }
 }
