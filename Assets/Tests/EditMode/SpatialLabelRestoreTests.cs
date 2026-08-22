@@ -55,6 +55,10 @@ namespace ObjectTagger.Tests.EditMode
             var contentObject = new GameObject("Content", typeof(RectTransform));
             contentObject.transform.SetParent(m_fixtureRoot.transform, false);
             m_contentParent = contentObject.transform;
+            // The content parent IS the anchor root at runtime -- the
+            // OVRSpatialAnchor component lives on it -- and the manager reads
+            // its live transform whenever it caches a label's local position.
+            m_contentParent.SetPositionAndRotation(AnchorPose.position, AnchorPose.rotation);
 
             var templateObject = new GameObject("LabelTemplate", typeof(RectTransform));
             templateObject.transform.SetParent(m_contentParent, false);
@@ -92,7 +96,7 @@ namespace ObjectTagger.Tests.EditMode
             var first = CommitRemoteLabelAt("coffee mug", new Vector3(0.5f, 1f, 2f));
             var second = CommitRemoteLabelAt("desk lamp", new Vector3(-2f, 0.25f, 4.5f));
 
-            var exported = m_manager.ExportCommittedLabels(AnchorPose);
+            var exported = m_manager.ExportCommittedLabels();
 
             Assert.AreEqual(2, exported.Length);
             AssertEntry(exported, first, "coffee mug", new Vector3(0.5f, 1f, 2f));
@@ -106,7 +110,7 @@ namespace ObjectTagger.Tests.EditMode
             var pending = Guid.NewGuid();
             Assert.IsTrue(m_manager.CreatePendingRemoteLabel(pending, new Vector3(0f, 0f, 1f)));
 
-            var exported = m_manager.ExportCommittedLabels(AnchorPose);
+            var exported = m_manager.ExportCommittedLabels();
 
             Assert.AreEqual(1, exported.Length, "a label still being identified is not committed");
             Assert.AreEqual(committed.ToString(), exported[0].id);
@@ -119,7 +123,7 @@ namespace ObjectTagger.Tests.EditMode
             Assert.IsTrue(m_manager.CreatePendingRemoteLabel(operationId, new Vector3(0f, 0f, 1f)));
             Assert.IsTrue(m_manager.CommitRemoteLabelFallback(operationId, "chair"));
 
-            var exported = m_manager.ExportCommittedLabels(AnchorPose);
+            var exported = m_manager.ExportCommittedLabels();
 
             Assert.AreEqual(1, exported.Length);
             Assert.AreEqual("chair" + RemoteSpatialLabelLifecycle.FallbackMarker, exported[0].className);
@@ -135,7 +139,7 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.IsTrue(InvokeUntagNearestToCenter());
 
-            var exported = m_manager.ExportCommittedLabels(AnchorPose);
+            var exported = m_manager.ExportCommittedLabels();
             Assert.AreEqual(1, exported.Length);
             Assert.AreEqual(offAxis.ToString(), exported[0].id);
             Assert.IsFalse(exported.Any(entry => entry.id == centred.ToString()));
@@ -149,7 +153,7 @@ namespace ObjectTagger.Tests.EditMode
 
             m_manager.ClearAnnotations();
 
-            Assert.AreEqual(0, m_manager.ExportCommittedLabels(AnchorPose).Length);
+            Assert.AreEqual(0, m_manager.ExportCommittedLabels().Length);
         }
 
         [Test]
@@ -162,10 +166,82 @@ namespace ObjectTagger.Tests.EditMode
             var pending = Guid.NewGuid();
             Assert.IsTrue(m_manager.CreatePendingRemoteLabel(pending, new Vector3(0f, 0f, 1f)));
 
-            var exported = m_manager.ExportCommittedLabels(AnchorPose);
+            var exported = m_manager.ExportCommittedLabels();
 
             Assert.IsNotEmpty(exported);
             Assert.IsTrue(exported.All(entry => entry.IsValid()));
+        }
+
+        // ---------------------------------------------------------------
+        // Anchor drift
+        //
+        // A committed label's world position only changes on commit,
+        // association or restore. Meta keeps refining the anchor's pose
+        // underneath it, and any later LabelsChanged -- a DIFFERENT label
+        // re-associating is enough -- re-exports every label. If export
+        // re-derived a stale label's local offset from the pose live at that
+        // moment, the anchor's movement since would be baked into the saved
+        // snapshot and compound on every reload.
+        // ---------------------------------------------------------------
+
+        [Test]
+        public void ExportKeepsAStaleLabelsLocalPositionWhenTheAnchorMovesAfterwards()
+        {
+            var worldPosition = new Vector3(0.5f, 1f, 2f);
+            CommitRemoteLabelAt("coffee mug", worldPosition);
+            var expectedLocal = SpatialLabelSnapshot.ToLocalPosition(worldPosition, AnchorPose);
+
+            MoveAnchorTo(new Pose(new Vector3(4f, -1f, 7f), Quaternion.Euler(10f, 37f, -5f)));
+
+            // The mug is never touched again; an unrelated second label is what
+            // triggers the re-export in production.
+            CommitRemoteLabelAt("desk lamp", new Vector3(-2f, 0.25f, 4.5f));
+
+            var mug = m_manager.ExportCommittedLabels().Single(entry => entry.className == "coffee mug");
+            AssertApproximately(expectedLocal, mug.localPosition);
+            AssertApproximately(
+                worldPosition,
+                SpatialLabelSnapshot.ToWorldPosition(mug.localPosition, AnchorPose));
+        }
+
+        [Test]
+        public void ExportUsesTheAnchorPoseContemporaneousWithEachLabel()
+        {
+            var earlyWorldPosition = new Vector3(0.5f, 1f, 2f);
+            CommitRemoteLabelAt("coffee mug", earlyWorldPosition);
+
+            var laterAnchorPose = new Pose(new Vector3(4f, -1f, 7f), Quaternion.Euler(0f, 37f, 0f));
+            MoveAnchorTo(laterAnchorPose);
+
+            var lateWorldPosition = new Vector3(-2f, 0.25f, 4.5f);
+            CommitRemoteLabelAt("desk lamp", lateWorldPosition);
+
+            var exported = m_manager.ExportCommittedLabels();
+
+            // Each label round-trips through the pose that was live when IT was
+            // placed -- two different poses in one snapshot.
+            AssertApproximately(
+                earlyWorldPosition,
+                SpatialLabelSnapshot.ToWorldPosition(
+                    exported.Single(e => e.className == "coffee mug").localPosition, AnchorPose));
+            AssertApproximately(
+                lateWorldPosition,
+                SpatialLabelSnapshot.ToWorldPosition(
+                    exported.Single(e => e.className == "desk lamp").localPosition, laterAnchorPose));
+        }
+
+        [Test]
+        public void RestoredLabelsKeepTheirStoredLocalPositionAcrossALaterAnchorMove()
+        {
+            var entry = Entry("coffee mug", new Vector3(0.5f, 1f, 2f), 41, 0.7f);
+            var storedLocal = entry.localPosition;
+
+            Assert.AreEqual(1, m_manager.RestoreCommittedLabels(new[] { entry }, AnchorPose));
+
+            MoveAnchorTo(new Pose(new Vector3(-3f, 2f, 1f), Quaternion.Euler(0f, -120f, 0f)));
+
+            var exported = m_manager.ExportCommittedLabels().Single();
+            AssertApproximately(storedLocal, exported.localPosition);
         }
 
         // ---------------------------------------------------------------
@@ -225,7 +301,7 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.AreEqual(2, m_manager.RestoreCommittedLabels(entries, AnchorPose));
 
-            var exported = m_manager.ExportCommittedLabels(AnchorPose);
+            var exported = m_manager.ExportCommittedLabels();
             Assert.AreEqual(2, exported.Length);
 
             foreach (var original in entries)
@@ -252,7 +328,7 @@ namespace ObjectTagger.Tests.EditMode
 
             Assert.AreEqual(2, m_manager.RestoreCommittedLabels(entries, AnchorPose));
 
-            var exportedIds = m_manager.ExportCommittedLabels(AnchorPose).Select(entry => entry.id).ToArray();
+            var exportedIds = m_manager.ExportCommittedLabels().Select(entry => entry.id).ToArray();
             Assert.AreEqual(2, exportedIds.Distinct().Count());
             CollectionAssert.IsEmpty(exportedIds.Intersect(originalIds));
         }
@@ -290,13 +366,13 @@ namespace ObjectTagger.Tests.EditMode
         {
             CommitRemoteLabelAt("coffee mug", new Vector3(0.5f, 1f, 2f));
             CommitRemoteLabelAt("desk lamp", new Vector3(-2f, 0.25f, 4.5f));
-            var beforeHide = m_manager.ExportCommittedLabels(AnchorPose);
+            var beforeHide = m_manager.ExportCommittedLabels();
 
             m_manager.SetRestorationAvailable(false);
             Assert.AreEqual(0, ActiveCards().Count, "Restoring/Unavailable must hide every committed view");
             Assert.AreEqual(
                 beforeHide.Length,
-                m_manager.ExportCommittedLabels(AnchorPose).Length,
+                m_manager.ExportCommittedLabels().Length,
                 "hiding views must not drop the labels themselves");
 
             m_manager.SetRestorationAvailable(true);
@@ -420,6 +496,11 @@ namespace ObjectTagger.Tests.EditMode
                 localPosition = SpatialLabelSnapshot.ToLocalPosition(worldPosition, AnchorPose),
             };
         }
+
+        /// Stands in for Meta refining the shared anchor's pose: the label root
+        /// the OVRSpatialAnchor component sits on is what actually moves.
+        private void MoveAnchorTo(Pose pose) =>
+            m_contentParent.SetPositionAndRotation(pose.position, pose.rotation);
 
         private List<Transform> ActiveCards() =>
             m_contentParent.Cast<Transform>().Where(child => child.gameObject.activeSelf).ToList();

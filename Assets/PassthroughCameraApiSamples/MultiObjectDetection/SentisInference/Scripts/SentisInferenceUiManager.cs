@@ -692,6 +692,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     record.WorldPosition = worldSpaceCenter;
                     record.SmoothedPosition = LabelPresentation.Smooth(record.SmoothedPosition, worldSpaceCenter, SmoothingFactor);
                     record.LastAssociatedScore = detection.score;
+                    CacheAnchorLocalPosition(record);
                     view.Label.text = $"{record.ClassName} — {Mathf.RoundToInt(record.LastAssociatedScore * 100)}%";
                     associationUpdated = true;
                 }
@@ -817,6 +818,10 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             var view = GetViewFromPoolOrCreate();
             view.Record = record;
+            // Cached HERE, not at commit: CommitRemoteLabel only names the
+            // card, it never moves it, so this is the instant its position is
+            // set and the only pose contemporaneous with it.
+            CacheAnchorLocalPosition(record);
             view.Label.text = RemoteSpatialLabelLifecycle.PresentationFor(record);
             view.RectTransform.position = point;
             view.RectTransform.gameObject.SetActive(m_restorationAvailable);
@@ -944,6 +949,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
             view.Record.WorldPosition = candidate.WorldPosition;
             view.Record.LastAssociatedScore = candidate.Score;
+            CacheAnchorLocalPosition(view.Record);
             view.Label.text = $"{view.Record.ClassName} — {Mathf.RoundToInt(view.Record.LastAssociatedScore * 100)}%";
             RaiseLabelsChanged();
             return true;
@@ -1156,18 +1162,26 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // wholly inside SpatialAnchorRestorationCoordinator.
         // ------------------------------------------------------------------
 
-        /// Every currently committed label, with positions expressed relative
-        /// to anchorPose so they survive the anchor being re-localized to a
+        /// Every currently committed label, positioned in the shared anchor's
+        /// local space so it survives the anchor being re-localized to a
         /// different world transform on the next launch.
+        ///
+        /// Takes NO anchor pose: each record already carries the local
+        /// position it was measured at (LabelRecord.AnchorLocalPosition), and
+        /// re-deriving it here from whatever pose happens to be live would
+        /// bake the anchor's drift-since-then into the snapshot. See that
+        /// field's comment.
         ///
         /// Pending remote labels are excluded: an unfinished naming operation
         /// is not a label the user placed, and restoring one would resurrect a
         /// permanent "Identifying…" card. Entries that could not be persisted
         /// (see SpatialLabelEntry.IsValid) are dropped individually, because
         /// the coordinator rejects a whole snapshot containing one bad label.
-        public SpatialLabelEntry[] ExportCommittedLabels(Pose anchorPose)
+        public SpatialLabelEntry[] ExportCommittedLabels()
         {
             var entries = new List<SpatialLabelEntry>(m_boxViews.Count);
+            var dropped = 0;
+
             foreach (var view in m_boxViews)
             {
                 var record = view.Record;
@@ -1187,19 +1201,42 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                     classId = record.ClassId,
                     className = className,
                     score = record.LastAssociatedScore,
-                    // The SMOOTHED position, not WorldPosition: it is the one
-                    // actually rendered, so what is saved is what was seen.
-                    localPosition =
-                        SpatialLabelSnapshot.ToLocalPosition(record.SmoothedPosition, anchorPose),
+                    localPosition = record.AnchorLocalPosition,
                 };
 
                 if (entry.IsValid())
                 {
                     entries.Add(entry);
                 }
+                else
+                {
+                    dropped++;
+                }
             }
 
+            LogDroppedExportEntriesOnce(dropped);
             return entries.ToArray();
+        }
+
+        // Logged once per component lifetime, matching this project's existing
+        // log-once diagnostics (see LogCropExtentOnce). An export runs on every
+        // committed-set change -- association updates included -- so a warning
+        // per call would flood the device log for a record that will keep
+        // failing every time.
+        private bool m_loggedDroppedExportEntries;
+
+        private void LogDroppedExportEntriesOnce(int dropped)
+        {
+            if (dropped == 0 || m_loggedDroppedExportEntries)
+            {
+                return;
+            }
+
+            m_loggedDroppedExportEntries = true;
+            Debug.LogWarning(
+                $"[ObjectTagger] dropped {dropped} committed label(s) from a spatial-label export: " +
+                "the record could not form a valid snapshot entry (non-finite position or score, " +
+                "empty name, or an unusable id). Further occurrences are not logged.");
         }
 
         /// Rebuilds committed views for every valid entry, placing each one at
@@ -1247,6 +1284,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 record.ClassName = entry.className;
                 record.WorldPosition = worldPosition;
                 record.SmoothedPosition = worldPosition;
+                // The stored local position is taken verbatim rather than
+                // re-derived from worldPosition: anchorPose produced
+                // worldPosition a line ago, so round-tripping it back would
+                // only add floating-point error to a value already exact.
+                record.AnchorLocalPosition = entry.localPosition;
                 record.LastAssociatedScore = entry.score;
 
                 // The stored name only. A remote-named label never had a
@@ -1319,6 +1361,29 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         }
 
         private static bool IsCommitted(LabelRecord record) => CommittedDisplayName(record) != null;
+
+        /// The shared anchor's world pose right now. ContentParent is the
+        /// GameObject the OVRSpatialAnchor component is attached to (see
+        /// DetectionManager.ResolveAnchorRoot), and Meta keeps its transform
+        /// tracking the real-world anchor, so this needs no Meta SDK type.
+        private Pose CurrentAnchorPose()
+        {
+            var parent = ContentParent;
+            return parent != null
+                ? new Pose(parent.position, parent.rotation)
+                : new Pose(Vector3.zero, Quaternion.identity);
+        }
+
+        /// Re-derives the record's persisted local position from the world
+        /// position it currently holds and the anchor pose live at this
+        /// instant. Must be called from EVERY site that writes
+        /// SmoothedPosition -- that pairing is the whole correctness
+        /// argument (see LabelRecord.AnchorLocalPosition).
+        private void CacheAnchorLocalPosition(LabelRecord record)
+        {
+            record.AnchorLocalPosition =
+                SpatialLabelSnapshot.ToLocalPosition(record.SmoothedPosition, CurrentAnchorPose());
+        }
 
         private void RaiseLabelsChanged() => LabelsChanged?.Invoke();
     }

@@ -40,6 +40,25 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         /// WorldPosition at commit time.
         public Vector3 SmoothedPosition;
 
+        /// Spatial-anchor Restoration Task 4 — SmoothedPosition expressed in
+        /// the shared anchor's local space, cached at the instant
+        /// SmoothedPosition was last written, from the anchor pose live at
+        /// that same instant.
+        ///
+        /// This is the value that gets persisted, and it is cached rather than
+        /// derived at save time for one reason: SmoothedPosition only changes
+        /// on commit, association or restore, while Meta keeps refining the
+        /// anchor's own pose underneath it. Re-deriving a stale label's local
+        /// offset from a later anchor pose would shift it by however far the
+        /// anchor had moved since -- silently, into the saved snapshot, and
+        /// compounding across every session that reloads and re-saves it.
+        /// Pairing each world position with the pose it was actually measured
+        /// against is what keeps the stored offset stable.
+        ///
+        /// Every write to SmoothedPosition must refresh this (see
+        /// SentisInferenceUiManager.CacheAnchorLocalPosition).
+        public Vector3 AnchorLocalPosition;
+
         public float LastAssociatedScore;
 
         /// Ticket 08: set when this label was committed by the on-headset YOLO

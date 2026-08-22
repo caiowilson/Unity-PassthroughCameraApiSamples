@@ -68,10 +68,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private void Start()
         {
             var operations = new MetaSpatialAnchorOperations(this, ResolveAnchorRoot);
-            m_anchorRestoration = new SpatialAnchorRestorationCoordinator(
+            BindRestoration(new SpatialAnchorRestorationCoordinator(
                 operations,
                 Path.Combine(
-                    Application.persistentDataPath, SpatialLabelSnapshotStore.DefaultFileName));
+                    Application.persistentDataPath, SpatialLabelSnapshotStore.DefaultFileName)));
+            m_anchorRestoration.Initialize();
+        }
+
+        // Split out of Start so this wiring can be exercised without the Meta
+        // adapter Start builds: an EditMode test binds a coordinator backed by
+        // a fake ISpatialAnchorOperations and then drives the REAL handlers,
+        // instead of re-implementing the wiring and testing the copy.
+        private void BindRestoration(SpatialAnchorRestorationCoordinator coordinator)
+        {
+            m_anchorRestoration = coordinator;
             m_anchorRestoration.StateChanged += OnAnchorRestorationStateChanged;
 
             if (m_uiInference != null)
@@ -82,8 +92,6 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 // rather than waiting for a transition that never comes.
                 m_uiInference.SetRestorationAvailable(m_anchorRestoration.CanTag);
             }
-
-            m_anchorRestoration.Initialize();
         }
 
         private GameObject ResolveAnchorRoot()
@@ -182,11 +190,17 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_hasAttemptedLabelRestore = true;
 
             var snapshot = m_anchorRestoration.Snapshot;
-            if (snapshot?.labels == null ||
-                snapshot.labels.Length == 0 ||
-                m_uiInference == null ||
-                !TryResolveAnchorPose(out var anchorPose))
+            if (snapshot?.labels == null || snapshot.labels.Length == 0 || m_uiInference == null)
             {
+                return;
+            }
+
+            if (!TryResolveAnchorPose(out var anchorPose))
+            {
+                Debug.LogWarning(
+                    $"[ObjectTagger] the shared spatial anchor is Ready but its root transform could " +
+                    $"not be resolved; {snapshot.labels.Length} saved label(s) were not restored. " +
+                    "The snapshot is left on disk untouched.");
                 return;
             }
 
@@ -201,21 +215,23 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // saving against it would move every label on the next launch.
         private void OnLabelsChanged()
         {
-            if (m_anchorRestoration == null ||
-                !m_anchorRestoration.CanTag ||
-                m_uiInference == null ||
-                !TryResolveAnchorPose(out var anchorPose))
+            if (m_anchorRestoration == null || !m_anchorRestoration.CanTag || m_uiInference == null)
             {
                 return;
             }
 
-            // anchorUuid is left unset on purpose: Persist ignores whatever the
-            // caller puts there and stamps the live bound anchor's UUID, so a
-            // snapshot can never name an anchor its labels were not placed
+            // No anchor pose is passed: every label already carries the local
+            // position it was measured at, and handing the export a live pose
+            // is exactly how anchor drift would leak into the snapshot. See
+            // LabelRecord.AnchorLocalPosition.
+            //
+            // anchorUuid is left unset on purpose too: Persist ignores whatever
+            // the caller puts there and stamps the live bound anchor's UUID, so
+            // a snapshot can never name an anchor its labels were not placed
             // against.
             m_anchorRestoration.Persist(new SpatialLabelSnapshot
             {
-                labels = m_uiInference.ExportCommittedLabels(anchorPose)
+                labels = m_uiInference.ExportCommittedLabels()
             });
         }
 
