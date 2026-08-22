@@ -84,6 +84,13 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             m_anchorRestoration = coordinator;
             m_anchorRestoration.StateChanged += OnAnchorRestorationStateChanged;
 
+            if (m_uiMenuManager != null)
+            {
+                m_uiMenuManager.ResetSavedSpaceConfirmed -= RequestSpatialSpaceReset;
+                m_uiMenuManager.ResetSavedSpaceConfirmed += RequestSpatialSpaceReset;
+                m_uiMenuManager.SetSpatialAnchorRestorationState(m_anchorRestoration.State);
+            }
+
             if (m_uiInference != null)
             {
                 m_uiInference.LabelsChanged += OnLabelsChanged;
@@ -140,6 +147,11 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 m_anchorRestoration.Shutdown();
             }
 
+            if (m_uiMenuManager != null)
+            {
+                m_uiMenuManager.ResetSavedSpaceConfirmed -= RequestSpatialSpaceReset;
+            }
+
             OVRManager.TrackingLost -= OnTrackingLost;
         }
 
@@ -149,6 +161,8 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void OnAnchorRestorationStateChanged(SpatialAnchorRestorationState state)
         {
+            m_uiMenuManager?.SetSpatialAnchorRestorationState(state);
+
             if (state == SpatialAnchorRestorationState.Resetting)
             {
                 // Clearing the label views on the confirmed reset rather than after
@@ -493,7 +507,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         // IsSpatialAnchorReady.
         private void UpdateBButtonHoldState(bool canTag)
         {
-            if (!canTag)
+            if (!canTag || (m_uiMenuManager != null && m_uiMenuManager.IsBlockingTaggingInput))
             {
                 m_bIsHeld = false;
                 m_bClearAllFired = false;

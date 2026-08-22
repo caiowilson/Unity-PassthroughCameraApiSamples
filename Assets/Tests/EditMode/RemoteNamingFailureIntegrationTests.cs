@@ -566,6 +566,25 @@ namespace ObjectTagger.Tests.EditMode
             }
         }
 
+        [Test]
+        public void RecoveryConfirmationIsTheOnlyRecoveryStateThatOwnsGestureInput()
+        {
+            using (var fixture = new ControllerFixture())
+            {
+                fixture.SetRecoveryState(SpatialAnchorRestorationState.Unavailable);
+                Assert.IsFalse(fixture.Menu.IsPaused);
+                Assert.IsFalse(fixture.Menu.IsBlockingTaggingInput);
+
+                fixture.OpenRecoveryConfirmation();
+                Assert.IsTrue(fixture.Menu.IsPaused);
+                Assert.IsTrue(fixture.Menu.IsBlockingTaggingInput);
+
+                fixture.CancelRecoveryConfirmation();
+                Assert.IsFalse(fixture.Menu.IsPaused);
+                Assert.IsFalse(fixture.Menu.IsBlockingTaggingInput);
+            }
+        }
+
         [TestCase("HandleRemoteAvailability", false, false)]
         [TestCase("HandleRemoteAvailability", true, true)]
         [TestCase("OnApplicationPause", true, false)]
@@ -720,10 +739,33 @@ namespace ObjectTagger.Tests.EditMode
                 var uiObject = new GameObject("Ui");
                 uiObject.transform.SetParent(m_root.transform, false);
                 var menu = uiObject.AddComponent<DetectionUiMenuManager>();
+                Menu = menu;
                 var labelObject = new GameObject("Status", typeof(RectTransform), typeof(CanvasRenderer), typeof(Text));
                 labelObject.transform.SetParent(uiObject.transform, false);
                 m_statusLabel = labelObject.GetComponent<Text>();
                 SetPrivateField(menu, "m_labelInformation", m_statusLabel);
+                var recoveryPanel = new GameObject("RecoveryPanel");
+                recoveryPanel.transform.SetParent(uiObject.transform, false);
+                var actionButton = CreateButton(
+                    "ActionButton",
+                    recoveryPanel.transform,
+                    "Forget saved room and labels");
+                var confirmationPanel = new GameObject("ConfirmationPanel");
+                confirmationPanel.transform.SetParent(recoveryPanel.transform, false);
+                var confirmButton = CreateButton(
+                    "ConfirmButton",
+                    confirmationPanel.transform,
+                    "Forget saved room and labels");
+                var cancelButton = CreateButton(
+                    "CancelButton",
+                    confirmationPanel.transform,
+                    "Cancel");
+                SetPrivateField(menu, "m_recoveryPanel", recoveryPanel);
+                SetPrivateField(menu, "m_recoveryConfirmationPanel", confirmationPanel);
+                SetPrivateField(menu, "m_recoveryActionButton", actionButton);
+                SetPrivateField(menu, "m_recoveryConfirmButton", confirmButton);
+                SetPrivateField(menu, "m_recoveryCancelButton", cancelButton);
+                InvokePrivate(menu, "Awake");
                 SetAutoProperty(menu, "IsPaused", false);
                 menu.enabled = false;
 
@@ -784,6 +826,7 @@ namespace ObjectTagger.Tests.EditMode
             public RemoteNamingController Controller { get; }
             public CompanionReadinessController Readiness { get; }
             public SentisInferenceUiManager Manager { get; }
+            public DetectionUiMenuManager Menu { get; }
             public RemoteNamingSession Session => GetPrivateField<RemoteNamingSession>(Controller, "m_session");
             public UnityWebRequest LiveRequest => GetPrivateField<UnityWebRequest>(Controller, "m_liveRequest");
             public int ActiveCardCount => m_content.Cast<Transform>().Count(child => child.gameObject.activeSelf);
@@ -891,12 +934,46 @@ namespace ObjectTagger.Tests.EditMode
                 InvokePrivate(m_detectionManager, methodName, arguments);
             }
 
+            public void SetRecoveryState(SpatialAnchorRestorationState state)
+            {
+                Menu.SetSpatialAnchorRestorationState(state);
+            }
+
+            public void OpenRecoveryConfirmation()
+            {
+                GetPrivateField<Button>(Menu, "m_recoveryActionButton").onClick.Invoke();
+            }
+
+            public void CancelRecoveryConfirmation()
+            {
+                GetPrivateField<Button>(Menu, "m_recoveryCancelButton").onClick.Invoke();
+            }
+
             public void Dispose()
             {
                 if (m_root != null)
                 {
                     UnityEngine.Object.DestroyImmediate(m_root);
                 }
+            }
+
+            private static Button CreateButton(string name, Transform parent, string label)
+            {
+                var buttonObject = new GameObject(
+                    name,
+                    typeof(RectTransform),
+                    typeof(CanvasRenderer),
+                    typeof(Image),
+                    typeof(Button));
+                buttonObject.transform.SetParent(parent, false);
+                var labelObject = new GameObject(
+                    "Label",
+                    typeof(RectTransform),
+                    typeof(CanvasRenderer),
+                    typeof(Text));
+                labelObject.transform.SetParent(buttonObject.transform, false);
+                labelObject.GetComponent<Text>().text = label;
+                return buttonObject.GetComponent<Button>();
             }
         }
 

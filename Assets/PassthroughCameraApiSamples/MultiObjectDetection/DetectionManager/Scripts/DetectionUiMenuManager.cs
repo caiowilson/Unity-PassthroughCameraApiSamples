@@ -1,5 +1,6 @@
 // Copyright (c) Meta Platforms, Inc. and affiliates.
 
+using System;
 using System.Collections;
 using Meta.XR.Samples;
 using UnityEngine;
@@ -16,21 +17,49 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         [SerializeField] private GameObject m_initialPanel;
         [SerializeField] private GameObject m_noPermissionPanel;
         [SerializeField] private Text m_labelInformation;
+        [SerializeField] private GameObject m_recoveryPanel;
+        [SerializeField] private GameObject m_recoveryConfirmationPanel;
+        [SerializeField] private Button m_recoveryActionButton;
+        [SerializeField] private Button m_recoveryConfirmButton;
+        [SerializeField] private Button m_recoveryCancelButton;
 
         public bool IsInputActive { get; set; } = false;
 
         public UnityEvent<bool> OnPause;
+        public event Action ResetSavedSpaceConfirmed;
 
         public bool IsCompanionReady => m_companionReadiness.IsReady;
 
         private bool m_initialMenu;
+        private bool m_noPermissionMenu;
         private CompanionReadiness m_companionReadiness = CompanionReadiness.Loading();
         private string m_remoteRecognitionPresentation;
+        private SpatialAnchorRecoveryPresentation m_recoveryPresentation;
+        private bool m_recoveryConfirmationOpen;
+        private bool m_recoveryResetRequested;
 
         // pause menu
         public bool IsPaused { get; private set; } = true;
+        public bool IsBlockingTaggingInput => m_recoveryConfirmationOpen;
 
         #region Unity Functions
+        private void Awake()
+        {
+            if (m_recoveryPanel != null)
+            {
+                m_recoveryPanel.SetActive(false);
+            }
+
+            if (m_recoveryConfirmationPanel != null)
+            {
+                m_recoveryConfirmationPanel.SetActive(false);
+            }
+
+            m_recoveryActionButton?.onClick.AddListener(HandleRecoveryActionPressed);
+            m_recoveryConfirmButton?.onClick.AddListener(HandleRecoveryConfirmPressed);
+            m_recoveryCancelButton?.onClick.AddListener(HandleRecoveryCancelPressed);
+        }
+
         private IEnumerator Start()
         {
             m_initialPanel.SetActive(false);
@@ -56,12 +85,20 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 InitialMenuUpdate();
             }
         }
+
+        private void OnDestroy()
+        {
+            m_recoveryActionButton?.onClick.RemoveListener(HandleRecoveryActionPressed);
+            m_recoveryConfirmButton?.onClick.RemoveListener(HandleRecoveryConfirmPressed);
+            m_recoveryCancelButton?.onClick.RemoveListener(HandleRecoveryCancelPressed);
+        }
         #endregion
 
         #region Ui state: No permissions Menu
         private void OnNoPermissionMenu()
         {
             m_initialMenu = false;
+            m_noPermissionMenu = true;
             IsPaused = true;
             m_initialPanel.SetActive(false);
             m_noPermissionPanel.SetActive(true);
@@ -73,6 +110,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private void OnInitialMenu()
         {
             m_initialMenu = true;
+            m_noPermissionMenu = false;
             IsPaused = true;
             m_initialPanel.SetActive(true);
             m_noPermissionPanel.SetActive(false);
@@ -89,6 +127,7 @@ namespace PassthroughCameraSamples.MultiObjectDetection
         private void OnPauseMenu(bool visible)
         {
             m_initialMenu = false;
+            m_noPermissionMenu = false;
             IsPaused = visible;
 
             m_initialPanel.SetActive(false);
@@ -148,13 +187,107 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             UpdateLabelInformation();
         }
 
+        public void SetSpatialAnchorRestorationState(SpatialAnchorRestorationState state)
+        {
+            m_recoveryPresentation = SpatialAnchorRecoveryPresentationPolicy.Evaluate(state);
+            if (!m_recoveryPresentation.ShowsRecoveryPanel)
+            {
+                CloseRecoveryConfirmation();
+            }
+
+            UpdateRecoveryPanel();
+            UpdateLabelInformation();
+        }
+
         private void UpdateLabelInformation()
         {
+            if (!string.IsNullOrEmpty(m_recoveryPresentation.StatusText))
+            {
+                m_labelInformation.text = m_recoveryPresentation.StatusText;
+                return;
+            }
+
             // The serialized information RectTransform has room for two lines.
             // Remote status/result must be first so it can never be clipped.
             m_labelInformation.text = RemoteNamingPresentation.Compose(
                 m_companionReadiness,
                 m_remoteRecognitionPresentation);
+        }
+
+        private void UpdateRecoveryPanel()
+        {
+            var showPanel = m_recoveryPresentation.ShowsRecoveryPanel;
+            if (m_recoveryPanel != null)
+            {
+                m_recoveryPanel.SetActive(showPanel);
+            }
+
+            if (m_recoveryActionButton != null)
+            {
+                m_recoveryActionButton.gameObject.SetActive(showPanel && !m_recoveryConfirmationOpen);
+                m_recoveryActionButton.interactable = showPanel && !m_recoveryResetRequested;
+            }
+
+            if (m_recoveryConfirmationPanel != null)
+            {
+                m_recoveryConfirmationPanel.SetActive(showPanel && m_recoveryConfirmationOpen);
+            }
+
+            if (m_recoveryConfirmButton != null)
+            {
+                m_recoveryConfirmButton.interactable = !m_recoveryResetRequested;
+            }
+
+            if (m_recoveryCancelButton != null)
+            {
+                m_recoveryCancelButton.interactable = !m_recoveryResetRequested;
+            }
+        }
+
+        private void HandleRecoveryActionPressed()
+        {
+            if (!m_recoveryPresentation.ShowsRecoveryPanel || m_recoveryConfirmationOpen || m_recoveryResetRequested)
+            {
+                return;
+            }
+
+            m_recoveryConfirmationOpen = true;
+            IsPaused = true;
+            UpdateRecoveryPanel();
+        }
+
+        private void HandleRecoveryConfirmPressed()
+        {
+            if (!m_recoveryConfirmationOpen || m_recoveryResetRequested)
+            {
+                return;
+            }
+
+            m_recoveryResetRequested = true;
+            UpdateRecoveryPanel();
+            ResetSavedSpaceConfirmed?.Invoke();
+        }
+
+        private void HandleRecoveryCancelPressed()
+        {
+            if (!m_recoveryConfirmationOpen || m_recoveryResetRequested)
+            {
+                return;
+            }
+
+            CloseRecoveryConfirmation();
+            UpdateRecoveryPanel();
+        }
+
+        private void CloseRecoveryConfirmation()
+        {
+            m_recoveryConfirmationOpen = false;
+            m_recoveryResetRequested = false;
+
+            if (!m_initialMenu && !m_noPermissionMenu)
+            {
+                IsPaused = false;
+            }
         }
 
         public void OnObjectsDetected(int objects)
