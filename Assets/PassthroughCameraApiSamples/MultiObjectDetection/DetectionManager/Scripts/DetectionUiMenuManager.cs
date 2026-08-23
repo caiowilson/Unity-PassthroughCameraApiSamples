@@ -30,11 +30,14 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         public bool IsCompanionReady => m_companionReadiness.IsReady;
 
+        private const float RestoreStatusMinimumSeconds = 1f;
         private bool m_initialMenu;
         private bool m_noPermissionMenu;
         private CompanionReadiness m_companionReadiness = CompanionReadiness.Loading();
         private string m_remoteRecognitionPresentation;
+        private SpatialAnchorRestorationState m_restorationState;
         private SpatialAnchorRecoveryPresentation m_recoveryPresentation;
+        private float m_restoreStatusVisibleUntil;
         private bool m_recoveryConfirmationOpen;
         private bool m_recoveryResetRequested;
 
@@ -109,6 +112,12 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void OnInitialMenu()
         {
+            if (ShouldBypassInitialMenu())
+            {
+                OnPauseMenu(false);
+                return;
+            }
+
             m_initialMenu = true;
             m_noPermissionMenu = false;
             IsPaused = true;
@@ -189,12 +198,22 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         public void SetSpatialAnchorRestorationState(SpatialAnchorRestorationState state)
         {
+            m_restorationState = state;
+            if (state == SpatialAnchorRestorationState.Restoring)
+            {
+                m_restoreStatusVisibleUntil = Time.unscaledTime + RestoreStatusMinimumSeconds;
+            }
+
             m_recoveryPresentation = SpatialAnchorRecoveryPresentationPolicy.Evaluate(state);
-            if (!m_recoveryPresentation.ShowsRecoveryPanel)
+            if (!m_recoveryPresentation.ShowsRecoveryPanel &&
+                (!m_recoveryConfirmationOpen ||
+                 (state != SpatialAnchorRestorationState.Restoring &&
+                 state != SpatialAnchorRestorationState.Resetting)))
             {
                 CloseRecoveryConfirmation();
             }
 
+            EnsureRestorationPresentationIsReachable();
             UpdateRecoveryPanel();
             UpdateLabelInformation();
         }
@@ -207,11 +226,30 @@ namespace PassthroughCameraSamples.MultiObjectDetection
                 return;
             }
 
+            if (m_restoreStatusVisibleUntil > Time.unscaledTime)
+            {
+                m_labelInformation.text = SpatialAnchorRecoveryPresentationPolicy.RestoringStatus;
+                return;
+            }
+
             // The serialized information RectTransform has room for two lines.
             // Remote status/result must be first so it can never be clipped.
             m_labelInformation.text = RemoteNamingPresentation.Compose(
                 m_companionReadiness,
                 m_remoteRecognitionPresentation);
+        }
+
+        private bool ShouldBypassInitialMenu()
+        {
+            return m_restorationState != SpatialAnchorRestorationState.NoSavedSpace;
+        }
+
+        private void EnsureRestorationPresentationIsReachable()
+        {
+            if (m_initialMenu && ShouldBypassInitialMenu())
+            {
+                OnPauseMenu(false);
+            }
         }
 
         private void UpdateRecoveryPanel()

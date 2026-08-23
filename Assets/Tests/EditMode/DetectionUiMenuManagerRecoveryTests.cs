@@ -11,6 +11,7 @@ namespace ObjectTagger.Tests.EditMode
         private GameObject m_root;
         private DetectionUiMenuManager m_menu;
         private Text m_statusText;
+        private GameObject m_initialPanel;
         private GameObject m_recoveryPanel;
         private GameObject m_recoveryConfirmationPanel;
         private Button m_recoveryActionButton;
@@ -34,8 +35,8 @@ namespace ObjectTagger.Tests.EditMode
 
             var loadingPanel = new GameObject("Loading");
             loadingPanel.transform.SetParent(m_root.transform, false);
-            var initialPanel = new GameObject("Initial");
-            initialPanel.transform.SetParent(m_root.transform, false);
+            m_initialPanel = new GameObject("Initial");
+            m_initialPanel.transform.SetParent(m_root.transform, false);
             var noPermissionPanel = new GameObject("NoPermission");
             noPermissionPanel.transform.SetParent(m_root.transform, false);
 
@@ -57,7 +58,7 @@ namespace ObjectTagger.Tests.EditMode
                 "Cancel");
 
             SetPrivateField(m_menu, "m_loadingPanel", loadingPanel);
-            SetPrivateField(m_menu, "m_initialPanel", initialPanel);
+            SetPrivateField(m_menu, "m_initialPanel", m_initialPanel);
             SetPrivateField(m_menu, "m_noPermissionPanel", noPermissionPanel);
             SetPrivateField(m_menu, "m_labelInformation", m_statusText);
             SetPrivateField(m_menu, "m_recoveryPanel", m_recoveryPanel);
@@ -104,6 +105,19 @@ namespace ObjectTagger.Tests.EditMode
         }
 
         [Test]
+        public void FastRestoreKeepsTheRestoringStatusVisibleBriefly()
+        {
+            m_menu.SetSpatialAnchorRestorationState(SpatialAnchorRestorationState.Restoring);
+
+            m_menu.SetSpatialAnchorRestorationState(SpatialAnchorRestorationState.Ready);
+
+            Assert.AreEqual(
+                SpatialAnchorRecoveryPresentationPolicy.RestoringStatus,
+                m_statusText.text);
+            Assert.IsFalse(m_recoveryPanel.activeSelf);
+        }
+
+        [Test]
         public void FirstActivationOpensConfirmationWithoutResetting()
         {
             m_menu.SetSpatialAnchorRestorationState(SpatialAnchorRestorationState.Unavailable);
@@ -115,6 +129,25 @@ namespace ObjectTagger.Tests.EditMode
             Assert.IsTrue(m_recoveryConfirmationPanel.activeSelf);
             Assert.IsTrue(m_menu.IsPaused);
             Assert.IsTrue(m_menu.IsBlockingTaggingInput);
+        }
+
+        [Test]
+        public void FirstActivationSurvivesTransientRestoringState()
+        {
+            m_menu.SetSpatialAnchorRestorationState(SpatialAnchorRestorationState.Unavailable);
+            m_recoveryActionButton.onClick.Invoke();
+
+            m_menu.SetSpatialAnchorRestorationState(SpatialAnchorRestorationState.Restoring);
+
+            Assert.IsFalse(m_recoveryActionButton.gameObject.activeSelf);
+            Assert.IsFalse(m_recoveryConfirmationPanel.activeSelf);
+            Assert.IsTrue(m_menu.IsPaused);
+            Assert.IsTrue(m_menu.IsBlockingTaggingInput);
+
+            m_menu.SetSpatialAnchorRestorationState(SpatialAnchorRestorationState.Unavailable);
+
+            Assert.IsFalse(m_recoveryActionButton.gameObject.activeSelf);
+            Assert.IsTrue(m_recoveryConfirmationPanel.activeSelf);
         }
 
         [Test]
@@ -175,6 +208,21 @@ namespace ObjectTagger.Tests.EditMode
             m_menu.SetSpatialAnchorRestorationState(SpatialAnchorRestorationState.NoSavedSpace);
 
             Assert.IsTrue(m_menu.IsPaused);
+        }
+
+        [Test]
+        public void SavedSpaceStatesBypassTheWelcomeScreen()
+        {
+            InvokePrivate(m_menu, "OnInitialMenu");
+            Assert.IsTrue(m_initialPanel.activeSelf);
+            Assert.IsTrue(m_menu.IsPaused);
+
+            m_menu.SetSpatialAnchorRestorationState(SpatialAnchorRestorationState.Unavailable);
+
+            Assert.IsFalse(m_initialPanel.activeSelf);
+            Assert.IsFalse(m_menu.IsPaused);
+            Assert.IsTrue(m_recoveryPanel.activeSelf);
+            Assert.IsTrue(m_recoveryActionButton.gameObject.activeSelf);
         }
 
         private void OnResetSavedSpaceConfirmed() => m_confirmedResets++;
