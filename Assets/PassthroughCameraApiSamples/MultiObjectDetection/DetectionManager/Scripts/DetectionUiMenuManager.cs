@@ -80,12 +80,16 @@ namespace PassthroughCameraSamples.MultiObjectDetection
 
         private void Update()
         {
-            if (!IsInputActive)
+            if (!IsInputActive && !m_initialMenu && !m_recoveryPresentation.ShowsRecoveryPanel)
                 return;
 
             if (m_initialMenu)
             {
                 InitialMenuUpdate();
+            }
+            else if (m_recoveryPresentation.ShowsRecoveryPanel)
+            {
+                RecoveryPanelUpdate();
             }
         }
 
@@ -130,6 +134,33 @@ namespace PassthroughCameraSamples.MultiObjectDetection
             if (InputManager.IsButtonADownOrPinchStarted())
             {
                 OnPauseMenu(false);
+            }
+        }
+
+        private void RecoveryPanelUpdate()
+        {
+            if (m_recoveryResetRequested)
+            {
+                return;
+            }
+
+            if (m_recoveryConfirmationOpen)
+            {
+                if (InputManager.IsButtonBHeldOrMiddleFingerPinchHeld())
+                {
+                    HandleRecoveryCancelPressed();
+                }
+                else if (InputManager.IsButtonADownOrPinchStarted())
+                {
+                    HandleRecoveryConfirmPressed();
+                }
+
+                return;
+            }
+
+            if (InputManager.IsButtonADownOrPinchStarted())
+            {
+                HandleRecoveryActionPressed();
             }
         }
 
